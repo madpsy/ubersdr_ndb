@@ -213,7 +213,7 @@ bool parse_args(int argc, char **argv, Options &o)
         else if (a == "--lat")          o.rx_lat = atof(next("--lat").c_str());
         else if (a == "--lon")          o.rx_lon = atof(next("--lon").c_str());
         else if (a == "--assist-km")    o.assist_km = atof(next("--assist-km").c_str());
-        else if (a == "--radius-km" || a == "--map-km") o.map_km = atof(next(a.c_str()).c_str());
+        else if (a == "--radius-km")    o.map_km = atof(next("--radius-km").c_str());
         else if (a == "--show-unlisted") o.show_unlisted = true;
         else if (a == "--data-dir")     o.data_dir = next("--data-dir");
         else if (a == "--summary-every") o.summary_every = atoi(next("--summary-every").c_str());
