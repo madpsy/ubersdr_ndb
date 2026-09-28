@@ -75,7 +75,13 @@
       <label class="toggle small" title="Beacons in the heard log that are not live now">
         <input type="checkbox" id="show-earlier" checked> Heard earlier
         <select id="earlier-window" title="How far back 'heard earlier' reaches">
-          <option value="86400">24 h</option>
+          <option value="600">10 min</option>
+          <option value="1800">30 min</option>
+          <option value="3600">1 h</option>
+          <option value="10800">3 h</option>
+          <option value="21600">6 h</option>
+          <option value="43200">12 h</option>
+          <option value="86400" selected>24 h</option>
           <option value="604800">7 days</option>
           <option value="0">all</option>
         </select>
