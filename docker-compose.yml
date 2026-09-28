@@ -11,10 +11,12 @@ services:
       # UberSDR session. Every NDB carrier inside a stream is found and decoded.
       #   iq48  = ±24 kHz   iq96 = ±48 kHz   iq192 = ±96 kHz   iq384 = ±192 kHz
       # (the outer 5% each side is ignored, where the passband rolls off)
-      # The default covers ~325-411 kHz. To cover the whole European NDB band
+      # The default covers ~316-402 kHz: of the NDBs in the navaid list, that
+      # window holds 93 of the 110 in the UK and Ireland (incl. 399-401 kHz).
+      # To cover the whole European NDB band
       # (roughly 255-526 kHz), for example:
       #   NDB_STREAMS: "300000:iq96,390000:iq96,480000:iq96"
-      NDB_STREAMS: "368000:iq96"
+      NDB_STREAMS: "359000:iq96"
       # Uncomment and set as needed:
       # PASS: ""               # UberSDR bypass password — wide IQ modes usually need one
       # NDB_PINNED: ""         # Hz, comma-separated: always decode these, even unseen
@@ -24,6 +26,7 @@ services:
       # RECEIVER_LAT: ""       # override the position from UberSDR's /api/description
       # RECEIVER_LON: ""
       # MIN_MARGIN: "26"       # reduced-depth IQ, dB below the band noise (0 = lossless)
+      # NDB_LOG_SUMMARY: "120" # log the full beacon table every N seconds (debugging)
       # WEB_PORT: "6100"
     volumes:
       # Heard log (heard.tsv): every beacon ever identified, kept across restarts

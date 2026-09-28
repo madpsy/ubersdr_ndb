@@ -136,7 +136,7 @@ run_image() {
 # ---------------------------------------------------------------------------
 #
 #   UBERSDR_URL   UberSDR base URL (default: http://ubersdr:8080)
-#   NDB_STREAMS   IQ streams, "centreHz:mode,..." (default: 368000:iq96)
+#   NDB_STREAMS   IQ streams, "centreHz:mode,..." (default: 359000:iq96)
 #   PASS          UberSDR bypass password (wide IQ modes usually need one)
 #   WEB_PORT      Web UI port (default: 6100)
 

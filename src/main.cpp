@@ -7,8 +7,8 @@
 // map) and a JSON API on a local port.
 //
 // Usage:
-//   ubersdr_ndb --url http://ubersdr:8080 --stream 368000:iq96 [--stream ...] [options]
-//   ubersdr_ndb --iq-file capture.iq --rate 96000 --center 368000   (offline)
+//   ubersdr_ndb --url http://ubersdr:8080 --stream 359000:iq96 [--stream ...] [options]
+//   ubersdr_ndb --iq-file capture.iq --rate 96000 --center 359000   (offline)
 //
 // Run with --help for the full option list.
 
@@ -75,6 +75,7 @@ struct Options {
     double      rx_lat = NAN, rx_lon = NAN;
     double      assist_km = 1500.0;  // published beacons this close get the lower detection threshold
     std::string data_dir;            // heard log persisted here ("" = memory only)
+    int         summary_every = 0;   // seconds between beacon-table dumps to the log (0 = never)
     std::string dump_iq;        // write received IQ (int16 interleaved) here (first stream)
     std::string iq_file;        // offline: read IQ from here instead
     double      file_rate = 0.0;
@@ -114,6 +115,8 @@ void usage(const char *argv0)
         "  --assist-km KM     published beacons within KM get a lower detection threshold\n"
         "                     (default: 1500, 0 = off)\n"
         "  --data-dir DIR     keep the heard log in DIR/heard.tsv across restarts\n"
+        "  --summary-every S  log the full beacon table every S seconds (default: 0 = off;\n"
+        "                     --iq-file runs always print one at the end)\n"
         "\n"
         "Web:\n"
         "  --web-port N       web UI port (default: %d, 0 = disabled)\n"
@@ -188,6 +191,7 @@ bool parse_args(int argc, char **argv, Options &o)
         else if (a == "--lon")          o.rx_lon = atof(next("--lon").c_str());
         else if (a == "--assist-km")    o.assist_km = atof(next("--assist-km").c_str());
         else if (a == "--data-dir")     o.data_dir = next("--data-dir");
+        else if (a == "--summary-every") o.summary_every = atoi(next("--summary-every").c_str());
         else if (a == "--web-port")     o.web_port = atoi(next("--web-port").c_str());
         else if (a == "--web-static")   o.web_static = next("--web-static");
         else { fprintf(stderr, "error: unknown option %s\n", a.c_str()); return false; }
@@ -1242,13 +1246,14 @@ int main(int argc, char **argv)
     } else {
         std::vector<std::thread> clients;
         for (auto &s : app.streams) clients.emplace_back(run_client, std::ref(app), std::ref(*s));
+        // The beacon table is a debugging aid: a line per carrier, every
+        // interval, drowns the container log. Off unless asked for.
         int n = 0;
         while (g_running) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
-            if (++n % 120 == 0) print_summary(app);
+            if (o.summary_every > 0 && ++n % o.summary_every == 0) print_summary(app);
         }
         for (auto &t : clients) t.join();
-        print_summary(app);
     }
 
     if (pusher.joinable()) pusher.join();

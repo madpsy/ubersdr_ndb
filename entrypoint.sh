@@ -4,7 +4,7 @@
 # Environment variables:
 #   UBERSDR_URL        UberSDR base URL (default: http://ubersdr:8080)
 #   PASS               UberSDR bypass password (wide IQ modes usually need one)
-#   NDB_STREAMS        IQ streams, comma-separated "centreHz:mode" (default: 368000:iq96)
+#   NDB_STREAMS        IQ streams, comma-separated "centreHz:mode" (default: 359000:iq96)
 #                      mode is iq48 | iq96 | iq192 | iq384 (±24 / ±48 / ±96 / ±192 kHz)
 #   NDB_PINNED         Frequencies in Hz always decoded, comma-separated (optional)
 #   NDB_SNR            Carrier detection threshold in dB above the floor (default: 10)
@@ -17,11 +17,12 @@
 #   DATA_DIR           Heard log directory (default: /data)
 #   WEB_STATIC         Web UI files (default: /usr/local/share/ubersdr_ndb/static)
 #   NAVAIDS            OurAirports navaids.csv (default: /usr/local/share/ubersdr_ndb/navaids.csv)
+#   NDB_LOG_SUMMARY    Log the full beacon table every N seconds (default: off)
 
 set -e
 
 URL="${UBERSDR_URL:-http://ubersdr:8080}"
-STREAMS="${NDB_STREAMS:-368000:iq96}"
+STREAMS="${NDB_STREAMS:-359000:iq96}"
 PORT="${WEB_PORT:-6100}"
 DATA="${DATA_DIR:-/data}"
 STATIC="${WEB_STATIC:-/usr/local/share/ubersdr_ndb/static}"
@@ -37,5 +38,6 @@ set -- --url "$URL" --stream "$STREAMS" --web-port "$PORT" --web-static "$STATIC
 [ -n "$RECEIVER_LAT" ]     && set -- "$@" --lat "$RECEIVER_LAT"
 [ -n "$RECEIVER_LON" ]     && set -- "$@" --lon "$RECEIVER_LON"
 [ -n "$MIN_MARGIN" ]       && set -- "$@" --min-margin "$MIN_MARGIN"
+[ -n "$NDB_LOG_SUMMARY" ]  && set -- "$@" --summary-every "$NDB_LOG_SUMMARY"
 
 exec /usr/local/bin/ubersdr_ndb "$@"

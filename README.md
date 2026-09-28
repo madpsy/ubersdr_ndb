@@ -4,7 +4,7 @@
 
 Requests one or more wideband IQ streams from UberSDR, finds every non-directional beacon (NDB) carrier in them, and decodes each beacon's Morse ident **in parallel**. Decoded idents are matched against the [OurAirports](https://ourairports.com/data/) navaid database and located relative to the receiver. A web UI shows the spectrum, a live beacon table, the copy as it is decoded, a persistent heard log, and a map.
 
-The default, one `iq96` stream centred on 368 kHz, covers roughly 325–411 kHz and costs a single UberSDR session, however many beacons are in it.
+The default, one `iq96` stream centred on 359 kHz, covers roughly 316–402 kHz and costs a single UberSDR session, however many beacons are in it. That centre is chosen from the navaid list: it takes in 93 of the 110 NDBs in the UK and Ireland, including those at 399–401 kHz. For another region, see [Streams](#streams).
 
 ---
 
@@ -101,7 +101,7 @@ Edit `~/ubersdr/ndb/docker-compose.yml`, then `./restart.sh`.
 | Variable | Default | |
 |---|---|---|
 | `UBERSDR_URL` | `http://ubersdr:8080` | UberSDR base URL |
-| `NDB_STREAMS` | `368000:iq96` | IQ streams, comma-separated `centreHz:mode`. One session each. |
+| `NDB_STREAMS` | `359000:iq96` | IQ streams, comma-separated `centreHz:mode`. One session each. |
 | `PASS` | | UberSDR bypass password. Wide IQ modes usually need one. |
 | `NDB_PINNED` | | Hz, comma-separated: always decode these, even if not detected |
 | `NDB_SNR` | `10` | Carrier detection threshold, dB above the noise floor |
@@ -109,6 +109,7 @@ Edit `~/ubersdr/ndb/docker-compose.yml`, then `./restart.sh`.
 | `NDB_MAX_CHANNELS` | `24` | Per stream |
 | `RECEIVER_LAT` / `RECEIVER_LON` | from UberSDR | Override the receiver position |
 | `MIN_MARGIN` | `26` | Reduced-depth IQ margin in dB (0 = lossless) |
+| `NDB_LOG_SUMMARY` | off | Log the full beacon table every N seconds (debugging) |
 | `WEB_PORT` | `6100` | |
 
 ### Streams
@@ -162,7 +163,7 @@ Needs `build-essential cmake libcurl4-openssl-dev libssl-dev zlib1g-dev pkg-conf
 
 ```bash
 ./build.sh                  # clones IXWebSocket, fetches navaids.csv, builds build/ubersdr_ndb
-./build/ubersdr_ndb --url http://ubersdr:8080 --stream 368000:iq96 --web-static static
+./build/ubersdr_ndb --url http://ubersdr:8080 --stream 359000:iq96 --web-static static
 ./docker.sh                 # local image;  ./docker.sh push  for multi-arch
 ```
 
@@ -170,12 +171,12 @@ Needs `build-essential cmake libcurl4-openssl-dev libssl-dev zlib1g-dev pkg-conf
 
 ```bash
 # record the IQ of a live run
-ubersdr_ndb --url … --stream 368000:iq96 --dump-iq cap.iq
+ubersdr_ndb --url … --stream 359000:iq96 --dump-iq cap.iq
 # replay it (as fast as it decodes, or --realtime to watch the UI)
-ubersdr_ndb --iq-file cap.iq --rate 96000 --center 368000 --lat 56.04 --lon -3.35
+ubersdr_ndb --iq-file cap.iq --rate 96000 --center 359000 --lat 56.04 --lon -3.35
 # one channel's ggmorse input as a WAV; CHAN_WPM / CHAN_PITCH pin ggmorse
 cmake --build build --target chan_audio
-./build/chan_audio cap.iq 96000 368000 341000 edn.wav
+./build/chan_audio cap.iq 96000 359000 341000 edn.wav
 ```
 
 ---
