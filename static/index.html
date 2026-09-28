@@ -67,6 +67,11 @@
       </label>
       <label class="toggle small" title="Beacons in the heard log that are not live now">
         <input type="checkbox" id="show-earlier" checked> Heard earlier
+        <select id="earlier-window" title="How far back 'heard earlier' reaches">
+          <option value="86400">24 h</option>
+          <option value="604800">7 days</option>
+          <option value="0">all</option>
+        </select>
       </label>
       <label class="toggle small" title="Published NDBs in the covered band that have never been heard">
         <input type="checkbox" id="show-unheard" checked> Unheard

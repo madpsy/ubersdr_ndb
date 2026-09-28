@@ -56,6 +56,10 @@ header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .toggle.small { font-size: 11px; text-transform: none; letter-spacing: 0; font-weight: 400; }
 .card-header .toggle.small:first-of-type { margin-left: auto; }
 .toggle input { accent-color: var(--accent); }
+.toggle select {
+  background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 5px;
+  font: inherit; font-size: 11px; padding: 0 2px; margin-left: 2px;
+}
 
 #status {
   display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px;
@@ -173,13 +177,41 @@ tbody tr.stale { opacity: 0.55; }
 .leaflet-control-attribution { background: rgba(10,10,18,0.78) !important; color: var(--muted) !important; }
 .leaflet-control-attribution a { color: var(--muted) !important; }
 .leaflet-bar a { background: var(--surface) !important; color: var(--text) !important; border-color: var(--border) !important; }
+.ndb-icon { overflow: visible; }
 .ndb-label {
-  background: rgba(13,13,15,0.85) !important; border: 1px solid #22c55e55 !important; color: var(--ok) !important;
-  font-family: var(--mono); font-weight: 700; font-size: 11px; padding: 1px 5px !important; box-shadow: none !important;
+  position: absolute; left: calc(100% + 5px); top: 50%; transform: translateY(-50%);
+  background: rgba(13,13,15,0.85); border: 1px solid #22c55e55; color: var(--ok); border-radius: 4px;
+  font-family: var(--mono); font-weight: 700; font-size: 11px; line-height: 1.3; padding: 0 5px;
+  white-space: nowrap; pointer-events: none;
 }
-.ndb-label.guess { border-color: #f59e0b55 !important; color: var(--warn) !important; }
-.ndb-label.sel { border-color: var(--accent) !important; color: var(--accent) !important; }
-.ndb-label::before { display: none; }
+.ndb-label.guess { border-color: #f59e0b55; color: var(--warn); }
+.ndb-label.earlier { border-color: #3b82f655; color: #60a5fa; font-size: 10px; }
+.ndb-label.sel { border-color: var(--accent); color: var(--accent); }
+.unheard-dot { width: 6px; height: 6px; border-radius: 50%; background: #6b6b7a99; border: 1px solid #6b6b7a; }
+
+/* Hover tooltips on map markers */
+.leaflet-tooltip.map-tip {
+  background: rgba(22,22,26,0.97); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); padding: 8px 10px; font-size: 11px; line-height: 1.5; white-space: normal;
+  min-width: 200px; max-width: 290px; box-shadow: 0 8px 24px rgba(0,0,0,0.55);
+}
+.leaflet-tooltip-top.map-tip::before { border-top-color: var(--border); }
+.leaflet-tooltip-bottom.map-tip::before { border-bottom-color: var(--border); }
+.map-tip .tt-head { font-size: 12px; }
+.map-tip .tt-head b { font-family: var(--mono); color: var(--accent); font-size: 13px; margin-right: 3px; }
+.map-tip .tt-sub { margin: 1px 0 5px; font-size: 10.5px; }
+.map-tip table { border-collapse: collapse; width: 100%; }
+.map-tip td { padding: 1px 0; border: none; white-space: normal; vertical-align: top; }
+.map-tip td:first-child { color: var(--muted); padding-right: 10px; white-space: nowrap; }
+.map-tip .m { color: var(--muted); }
+.map-tip .ok { color: var(--ok); }
+.map-tip .warn { color: var(--warn); }
+.map-tip .earlier { color: #60a5fa; }
+.map-tip .accent { color: var(--accent); }
+.map-tip .tt-copy {
+  margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--border);
+  font-family: var(--mono); color: var(--muted); word-break: break-all;
+}
 
 /* Map symbols: receiver, and NDBs drawn the way aeronautical charts draw them
    (a dot inside rings of dots). */

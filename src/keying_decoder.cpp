@@ -189,6 +189,9 @@ void KeyingDecoder::end_mark(double ms)
     quality_ = n ? float(good) / float(n) : 0.0f;
 
     code_ += ms < 2.0 * dit_ms_ ? '.' : '-';
+    // No Morse character has more than 6 elements; if there has been no
+    // letter gap by then, emit what we have (as '?') rather than let it grow.
+    if (code_.size() > 6) flush_letter(false);
 }
 
 void KeyingDecoder::end_space(double ms)

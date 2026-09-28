@@ -19,6 +19,7 @@ constexpr size_t kTextMax     = 400;      // decoded text kept per channel
 // clean copy every few minutes and need those copies to accumulate.
 constexpr double kTokenWindow = 3600.0;
 constexpr size_t kTokenMax    = 1024;
+constexpr size_t kTokenCharsMax = 16;   // longest run of letters kept between word gaps
 
 // NDB idents are machine-keyed slowly — typically 6-12 wpm. Bounding ggmorse's
 // speed search to this range is what lets it lock onto them at all: see
@@ -179,13 +180,21 @@ void NdbChannel::on_text(const std::string &s, double now_s, Source src)
         // ggmorse emits '\n' when it re-acquires on a new pitch: a break, so
         // treat it as a word gap.
         if (c == '\n' || c == '\r') c = ' ';
+        // Morse is ASCII, but ggmorse's alphabet includes a few non-ASCII
+        // letters and noise can decode as one. A lone high byte is invalid
+        // UTF-8, and IXWebSocket closes a socket rather than send it — which
+        // took down every browser connection once one got into the copy.
+        if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7e) c = '?';
         if (c == ' ') {
             if (!text.empty() && text.back() != ' ') text += ' ';
             end_token(token, now_s);
             continue;
         }
         text += c;
-        token += char(std::toupper((unsigned char)c));
+        // No ident is longer than a few letters; a run this long is noise
+        // that never produced a word gap, and must not grow without bound.
+        if (token.size() < kTokenCharsMax) token += char(std::toupper((unsigned char)c));
+        else token = "?";
     }
     if (text.size() > kTextMax) text.erase(0, text.size() - kTextMax);
     // The live feed and "last copied" follow the copy that is shown.
@@ -193,8 +202,10 @@ void NdbChannel::on_text(const std::string &s, double now_s, Source src)
         last_text_ = now_s;
         if (on_decode) {
             std::string clean = s;
-            for (char &c : clean)
+            for (char &c : clean) {
                 if (c == '\n' || c == '\r') c = ' ';
+                else if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7e) c = '?';
+            }
             on_decode(clean);
         }
     }

@@ -284,11 +284,33 @@ int64_t now_ms()
 // JSON helpers
 // ---------------------------------------------------------------------------
 
+// Length of a well-formed UTF-8 sequence starting at s[i], or 0 if it isn't.
+size_t utf8_len(const std::string &s, size_t i)
+{
+    const unsigned char c = s[i];
+    size_t n = c >= 0xf0 && c <= 0xf4 ? 4 : c >= 0xe0 ? 3 : c >= 0xc2 && c <= 0xdf ? 2 : 0;
+    if (n == 0 || i + n > s.size()) return 0;
+    for (size_t k = 1; k < n; ++k)
+        if ((static_cast<unsigned char>(s[i + k]) & 0xc0) != 0x80) return 0;
+    return n;
+}
+
+// JSON string body. Also guarantees valid UTF-8: every WebSocket text frame
+// carries JSON built here, and IXWebSocket closes the socket (1007) rather
+// than send a frame that isn't. Navaid names are legitimately UTF-8 and pass
+// through; a stray byte is replaced with U+FFFD.
 std::string json_escape(const std::string &s)
 {
     std::string o;
     o.reserve(s.size() + 2);
-    for (unsigned char c : s) {
+    for (size_t i = 0; i < s.size(); ++i) {
+        const unsigned char c = s[i];
+        if (c >= 0x80) {
+            size_t n = utf8_len(s, i);
+            if (n) { o.append(s, i, n); i += n - 1; }
+            else o += "\xef\xbf\xbd";
+            continue;
+        }
         switch (c) {
         case '"':  o += "\\\""; break;
         case '\\': o += "\\\\"; break;
@@ -539,6 +561,15 @@ void update_heard(App &app)
         e.best_snr_db = std::max(e.best_snr_db, c.snr_db);
         e.best_copies = std::max(e.best_copies, c.ident_count);
         app.heard_dirty = true;
+    }
+    // Bounded, so months of running can't grow it (or heard.tsv) without
+    // limit: past the cap, forget whatever was heard longest ago.
+    constexpr size_t kHeardMax = 2000;
+    while (app.heard.size() > kHeardMax) {
+        auto oldest = app.heard.begin();
+        for (auto it = app.heard.begin(); it != app.heard.end(); ++it)
+            if (it->second.last_s < oldest->second.last_s) oldest = it;
+        app.heard.erase(oldest);
     }
 }
 
@@ -1188,8 +1219,15 @@ int main(int argc, char **argv)
             if (tick % 4 == 0) out.push_back(status_json(app));
             if (tick % 8 == 0) out.push_back(spectrum_json(app));
             if (tick % 40 == 0) out.push_back(heard_json(app));
-            for (auto &c : clients)
+            // A browser that stops reading (a suspended tab, a stalled
+            // proxy) would otherwise have every push queued for it in
+            // memory indefinitely. Skip it while its backlog is large; it
+            // catches up from the next full status once it drains.
+            constexpr size_t kMaxBacklog = 2 * 1024 * 1024;
+            for (auto &c : clients) {
+                if (c->bufferedAmount() > kMaxBacklog) continue;
                 for (const auto &s : out) c->sendText(s);
+            }
         }
     });
 

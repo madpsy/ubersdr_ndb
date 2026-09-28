@@ -342,16 +342,22 @@ function clickSpec(view, e) {
 }
 
 // ── Map ─────────────────────────────────────────────────────────────────────
+//
+// Markers are kept and updated in place (keyed), not rebuilt each second, so
+// a hover tooltip stays open while the data behind it refreshes. The ident
+// label is part of each marker's icon, which leaves the tooltip free for the
+// detail shown on hover.
 
-let map = null, rxMarker = null, fitted = false, ringsFor = '';
-const layers = {};                // name -> L.LayerGroup
-const heardMarkers = new Map();   // channel id -> marker
+let map = null, fitted = false, ringsFor = '', unheardSig = '';
+const layers = {};                 // name -> L.LayerGroup
+const stores = { heard: new Map(), earlier: new Map(), unheard: new Map() };  // key -> { m, iconKey }
+let rxMarker = null;
 
 const RING_KM = [50, 100, 250, 500, 1000, 1500, 2000, 3000];
+const TIP = { direction: 'top', offset: [0, -10], className: 'map-tip', opacity: 1 };
 
-// NDB chart symbol: a dot inside a ring of dots. `fill` for live beacons,
-// hollow for guesses and history.
-function ndbIcon(colour, { size = 18, solid = true, sel = false } = {}) {
+// NDB chart symbol: a dot inside a ring of dots, with its ident beside it.
+function ndbIcon(colour, { size = 18, solid = true, sel = false, label = '', labelClass = '' } = {}) {
   const r = size / 2, dots = [];
   for (let i = 0; i < 12; i++) {
     const a = i / 12 * Math.PI * 2;
@@ -360,7 +366,8 @@ function ndbIcon(colour, { size = 18, solid = true, sel = false } = {}) {
   const halo = sel ? `<circle cx="${r}" cy="${r}" r="${r + 3}" fill="none" stroke="${colour}" stroke-width="1.5" opacity="0.7"/>` : '';
   const svg = `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${halo}${dots.join('')}
     <circle cx="${r}" cy="${r}" r="${solid ? 3.2 : 2.6}" fill="${solid ? colour : '#0d0d0f'}" stroke="${colour}" stroke-width="1.4"/></svg>`;
-  return L.divIcon({ className: 'ndb-icon', html: svg, iconSize: [size, size], iconAnchor: [r, r] });
+  const lab = label ? `<span class="ndb-label ${labelClass}">${esc(label)}</span>` : '';
+  return L.divIcon({ className: 'ndb-icon', html: svg + lab, iconSize: [size, size], iconAnchor: [r, r] });
 }
 
 function initMap() {
@@ -375,6 +382,12 @@ function initMap() {
     if (e.target.checked) layers[layer].addTo(map); else map.removeLayer(layers[layer]);
   });
   bind('show-rings', 'rings');
+  const sel = $('earlier-window');
+  try { const v = localStorage.getItem('ndb.earlierWindow'); if (v !== null) sel.value = v; } catch (e) { /* storage unavailable */ }
+  sel.addEventListener('change', () => {
+    try { localStorage.setItem('ndb.earlierWindow', sel.value); } catch (e) { /* storage unavailable */ }
+    renderMap();
+  });
   bind('show-earlier', 'earlier');
   bind('show-unheard', 'unheard');
 }
@@ -389,9 +402,8 @@ function drawRings(rx) {
       radius: km * 1000, color: '#00d4ff', weight: 1, opacity: 0.28, fill: false, dashArray: '3 6', interactive: false,
     }).addTo(layers.rings);
     // Label at the ring's southern edge, where it rarely collides with markers north of a European receiver.
-    const lat = rx.lat - km / 111.2;
     L.tooltip({ permanent: true, direction: 'center', className: 'ring-label', interactive: false })
-      .setLatLng([lat, rx.lon]).setContent(km >= 1000 ? `${km / 1000}k km` : `${km} km`).addTo(layers.rings);
+      .setLatLng([rx.lat - km / 111.2, rx.lon]).setContent(km >= 1000 ? `${km / 1000}k km` : `${km} km`).addTo(layers.rings);
   }
 }
 
@@ -413,12 +425,131 @@ function greatCircle(a, b, n = 48) {
   return pts;
 }
 
-function navPopup(n, c, extra = '') {
-  let h = `<b>${esc(n.ident)}</b> ${esc(n.name)} ${flag(n.country)}<br>${khz(n.freq_hz)} kHz`;
-  if (n.dist_km != null) h += ` · ${n.dist_km} km ${compass(n.bearing_deg)} (${n.bearing_deg}°)`;
-  if (n.power) h += `<br><span style="color:var(--muted)">power: ${esc(n.power.toLowerCase())}</span>`;
-  if (c) h += `<br>${c.snr_db.toFixed(0)} dB SNR${c.ident ? ` · copying <b>${esc(c.ident)}</b>` : ' · no copy yet'}`;
-  return h + extra;
+function maidenhead(lat, lon) {
+  let x = lon + 180, y = lat + 90;
+  const A = 'ABCDEFGHIJKLMNOPQR', a = 'abcdefghijklmnopqrstuvwx';
+  const f1 = A[Math.floor(x / 20)] + A[Math.floor(y / 10)];
+  x %= 20; y %= 10;
+  const f2 = `${Math.floor(x / 2)}${Math.floor(y)}`;
+  x %= 2; y %= 1;
+  return f1 + f2 + a[Math.floor(x * 12)] + a[Math.floor(y * 24)];
+}
+
+// ── Tooltip content ──
+
+const row = (k, v) => v == null || v === '' ? '' : `<tr><td>${k}</td><td>${v}</td></tr>`;
+const where = (n) => n.dist_km != null ? `${n.dist_km} km ${compass(n.bearing_deg)} <span class="m">(${n.bearing_deg}°)</span>` : '';
+const power = (p) => p ? p.charAt(0) + p.slice(1).toLowerCase() : '';
+
+function tipBeacon(n, c, kind) {
+  const status = {
+    confirmed: '<span class="ok">✓ decoded ident matches</span>',
+    near: `<span class="warn">≈ decoded ${esc(c.ident)} — all but the last letter</span>`,
+    guess: '<span class="warn">unconfirmed — nearest published beacon on this frequency</span>',
+  }[kind];
+  const offset = Math.round(c.freq_hz - n.freq_hz) || 0;   // || 0 turns -0 into 0
+  const others = kind === 'guess' && c.candidates.length > 1
+    ? c.candidates.slice(1, 4).map((x) => `${esc(x.ident)} ${esc(x.name)}${x.dist_km != null ? ` <span class="m">${x.dist_km} km</span>` : ''}`).join('<br>')
+    : '';
+  const copy = c.text.trim() ? esc(c.text.trim().slice(-48)) : '';
+  return `<div class="tt-head"><b>${esc(n.ident)}</b> ${esc(n.name)} ${flag(n.country)}</div>
+    <div class="tt-sub">${status}</div>
+    <table>
+      ${row('Published', `${(n.freq_hz / 1e3).toFixed(1)} kHz`)}
+      ${row('Measured', `${khz(c.freq_hz)} kHz <span class="m">(${offset > 0 ? '+' : ''}${offset} Hz)</span>`)}
+      ${row('Distance', where(n))}
+      ${row('SNR', `${c.snr_db.toFixed(0)} dB`)}
+      ${row('Tone / speed', c.keying ? `${c.pitch_hz} Hz · ${c.speed_wpm} wpm` : '<span class="m">no keying seen</span>')}
+      ${row('Copies', c.ident ? `${esc(c.ident)} ×${c.ident_count}` : '')}
+      ${row('Power', power(n.power))}
+      ${row('Also here', others)}
+    </table>
+    ${copy ? `<div class="tt-copy">${copy}</div>` : ''}`;
+}
+
+function tipEarlier(e) {
+  return `<div class="tt-head"><b>${esc(e.ident)}</b> ${esc(e.name)} ${flag(e.country)}</div>
+    <div class="tt-sub"><span class="earlier">heard earlier — not live now</span></div>
+    <table>
+      ${row('Frequency', `${(e.freq_hz / 1e3).toFixed(1)} kHz`)}
+      ${row('Distance', where(e))}
+      ${row('Last heard', `${ago(e.last_s)} <span class="m">${utcDate(e.last_s)}</span>`)}
+      ${row('First heard', `${ago(e.first_s)}`)}
+      ${row('Best SNR', `${e.best_snr_db.toFixed(0)} dB`)}
+      ${row('Best copies', `×${e.best_copies}`)}
+    </table>`;
+}
+
+function tipUnheard(n) {
+  return `<div class="tt-head"><b>${esc(n.ident)}</b> ${esc(n.name)} ${flag(n.country)}</div>
+    <div class="tt-sub"><span class="m">published · not heard</span></div>
+    <table>
+      ${row('Frequency', `${(n.freq_hz / 1e3).toFixed(1)} kHz`)}
+      ${row('Distance', where(n))}
+      ${row('Power', power(n.power))}
+      ${row('Position', `${n.lat.toFixed(3)}, ${n.lon.toFixed(3)}`)}
+    </table>`;
+}
+
+function tipReceiver(rx) {
+  const s = state.status;
+  const chans = s.channels;
+  const idd = chans.filter((c) => c.navaid || c.ident);
+  let far = null;
+  for (const c of chans) if (c.navaid?.dist_km != null && (!far || c.navaid.dist_km > far.navaid.dist_km)) far = c;
+  const streams = s.streams.map((x) => {
+    const span = x.sample_rate ? `${((x.center_hz - x.sample_rate * 0.45) / 1e3).toFixed(0)}–${((x.center_hz + x.sample_rate * 0.45) / 1e3).toFixed(0)} kHz` : `${(x.center_hz / 1e3).toFixed(0)} kHz`;
+    return `${span} <span class="m">${esc(x.mode)}${x.connected ? '' : ' · ' + esc(x.message)}</span>`;
+  }).join('<br>');
+  return `<div class="tt-head"><b>${esc(rx.callsign || rx.name || 'Receiver')}</b>${rx.callsign && rx.name ? ' ' + esc(rx.name) : ''}</div>
+    <div class="tt-sub"><span class="accent">this UberSDR instance</span></div>
+    <table>
+      ${row('Location', esc(rx.location))}
+      ${row('Position', `${rx.lat.toFixed(4)}, ${rx.lon.toFixed(4)} <span class="m">${maidenhead(rx.lat, rx.lon)}</span>`)}
+      ${row('Listening', streams)}
+      ${row('Carriers', `${chans.length} <span class="m">· ${idd.length} identified</span>`)}
+      ${row('Furthest now', far ? `${esc(far.navaid.ident)} ${esc(far.navaid.name)} · ${far.navaid.dist_km} km` : '')}
+      ${row('Heard log', `${state.heard.length} beacon${state.heard.length === 1 ? '' : 's'}`)}
+    </table>`;
+}
+
+// Open a marker's tooltip below it when there isn't room above for a full
+// one (they run to ~240 px), so it isn't clipped by the map's top edge.
+const TIP_ROOM_PX = 260;
+function placeTip(m) {
+  const t = m.getTooltip();
+  if (!t || !map) return;
+  const y = map.latLngToContainerPoint(m.getLatLng()).y;
+  const below = y < TIP_ROOM_PX && map.getSize().y - y > y;
+  t.options.direction = below ? 'bottom' : 'top';
+  t.options.offset = below ? [0, 10] : [0, -10];
+  if (t.isOpen()) t.update();
+}
+
+// Create or update a keyed marker in place.
+function upsert(store, layer, key, ll, iconKey, makeIcon, tip, onClick, z = 0) {
+  let e = store.get(key);
+  if (!e) {
+    const m = L.marker(ll, { icon: makeIcon(), zIndexOffset: z });
+    m.on('mouseover', () => placeTip(m));
+    m.bindTooltip(tip, TIP).addTo(layer);
+    if (onClick) m.on('click', onClick);
+    e = { m, iconKey };
+    store.set(key, e);
+  } else {
+    const cur = e.m.getLatLng();
+    if (cur.lat !== ll[0] || cur.lng !== ll[1]) e.m.setLatLng(ll);
+    if (e.iconKey !== iconKey) { e.m.setIcon(makeIcon()); e.m.setZIndexOffset(z); e.iconKey = iconKey; }
+    e.m.setTooltipContent(tip);
+  }
+  e.seen = true;
+  return e.m;
+}
+
+function sweep(store, layer) {
+  for (const [k, e] of store) {
+    if (!e.seen) { layer.removeLayer(e.m); store.delete(k); } else e.seen = false;
+  }
 }
 
 function renderMap() {
@@ -432,16 +563,18 @@ function renderMap() {
       rxMarker = L.marker([rx.lat, rx.lon], {
         icon: L.divIcon({ className: '', html: '<div class="rx-icon"><div class="pulse"></div><div class="core"></div></div>', iconSize: [22, 22], iconAnchor: [11, 11] }),
         zIndexOffset: 1000,
-      }).bindTooltip(`<b>${esc(rx.callsign || rx.name || 'Receiver')}</b>${rx.location ? '<br>' + esc(rx.location) : ''}`, { direction: 'top', offset: [0, -10] })
-        .addTo(map);
+      });
+      rxMarker.on('mouseover', () => placeTip(rxMarker));
+      rxMarker.bindTooltip('', TIP).addTo(map);
     }
+    rxMarker.setTooltipContent(tipReceiver(rx));
   }
 
-  layers.heard.clearLayers();
+  // Live beacons (confirmed, near, and — if shown — unconfirmed guesses).
   layers.paths.clearLayers();
-  heardMarkers.clear();
   const pts = haveRx ? [[rx.lat, rx.lon]] : [];
-  const liveKeys = new Set();
+  const liveIdents = new Set();
+  const guessKeys = new Set();     // published beacons already drawn as a guess
   for (const c of visibleChannels()) {
     const id = identity(c);
     if (!id.nav) continue;
@@ -449,43 +582,47 @@ function renderMap() {
     if (guess && !$('show-unheard').checked) continue;
     const sel = c.id === state.selected;
     const ll = [id.nav.lat, id.nav.lon];
-    liveKeys.add(`${id.nav.ident}@${id.nav.freq_hz}`);
+    if (!guess) liveIdents.add(id.nav.ident);
+    else guessKeys.add(`${id.nav.ident}@${id.nav.freq_hz}`);
     const col = sel ? '#00d4ff' : guess ? '#f59e0b' : '#22c55e';
     if (haveRx) {
       L.polyline(greatCircle([rx.lat, rx.lon], ll), {
         color: col, weight: sel ? 2.5 : 1.5, opacity: guess ? 0.35 : 0.65, dashArray: guess ? '4 5' : null, interactive: false,
       }).addTo(layers.paths);
     }
-    const m = L.marker(ll, { icon: ndbIcon(col, { solid: !guess, sel }), zIndexOffset: sel ? 900 : guess ? 0 : 500 })
-      .bindPopup(navPopup(id.nav, c, guess ? '<br><span style="color:var(--warn)">unconfirmed — nearest published beacon on this frequency</span>' : ''))
-      .bindTooltip(esc(guess ? id.nav.ident + '?' : id.nav.ident), {
-        permanent: true, direction: 'right', offset: [9, 0], className: `ndb-label${guess ? ' guess' : ''}${sel ? ' sel' : ''}`,
-      })
-      .on('click', () => select(c.id, 'map'))
-      .addTo(layers.heard);
-    heardMarkers.set(c.id, m);
+    const label = guess ? id.nav.ident + '?' : id.nav.ident;
+    const labelClass = `${guess ? 'guess' : ''}${sel ? ' sel' : ''}`;
+    upsert(stores.heard, layers.heard, `c${c.id}:${id.nav.ident}`, ll, `${col}|${guess}|${sel}|${label}`,
+      () => ndbIcon(col, { solid: !guess, sel, label, labelClass }),
+      tipBeacon(id.nav, c, id.kind), () => select(c.id, 'map'), sel ? 900 : guess ? 0 : 500);
     if (!guess) pts.push(ll);
   }
+  sweep(stores.heard, layers.heard);
 
-  // Heard before, not live now.
-  layers.earlier.clearLayers();
-  const earlierKeys = new Set();
+  // Heard before, not live now — within the chosen window. NDB reception is
+  // diurnal (night skywave reaches far beyond daytime groundwave), so the
+  // default 24 h shows one full day/night cycle; "all" is the whole log.
+  const windowS = Number($('earlier-window').value);
+  const now = state.heardNow || Date.now() / 1000;
   for (const e of state.heard) {
-    if (!e.confirmed || e.lat == null) continue;
-    earlierKeys.add(`${e.ident}`);
-    if ([...liveKeys].some((lk) => lk.startsWith(e.ident + '@'))) continue;
-    L.marker([e.lat, e.lon], { icon: ndbIcon('#3b82f6', { size: 14, solid: false }) })
-      .bindPopup(navPopup({ ...e, power: '' }, null, `<br><span style="color:var(--muted)">last heard ${ago(e.last_s)} · best ${e.best_snr_db.toFixed(0)} dB</span>`))
-      .bindTooltip(esc(e.ident), { direction: 'right', offset: [7, 0] })
-      .addTo(layers.earlier);
+    if (!e.confirmed || e.lat == null || liveIdents.has(e.ident)) continue;
+    if (windowS > 0 && now - e.last_s > windowS) continue;
+    upsert(stores.earlier, layers.earlier, e.key, [e.lat, e.lon], 'earlier',
+      () => ndbIcon('#3b82f6', { size: 14, solid: false, label: e.ident, labelClass: 'earlier' }), tipEarlier(e));
   }
+  sweep(stores.earlier, layers.earlier);
 
-  layers.unheard.clearLayers();
-  for (const n of state.navaids) {
-    if (liveKeys.has(`${n.ident}@${n.freq_hz}`) || earlierKeys.has(n.ident)) continue;
-    L.circleMarker([n.lat, n.lon], { radius: 2.5, color: '#6b6b7a', weight: 1, fillOpacity: 0.5 })
-      .bindPopup(navPopup(n, null, '<br><span style="color:var(--muted)">not heard</span>'))
-      .addTo(layers.unheard);
+  // Published in band, never heard. Only rebuilt when the set changes.
+  const heardIdents = new Set([...liveIdents, ...state.heard.map((e) => e.ident)]);
+  const unheard = state.navaids.filter((n) => !heardIdents.has(n.ident) && !guessKeys.has(`${n.ident}@${n.freq_hz}`));
+  const sig = unheard.length + ':' + [...heardIdents, ...guessKeys].sort().join(',');
+  if (sig !== unheardSig) {
+    unheardSig = sig;
+    for (const n of unheard) {
+      upsert(stores.unheard, layers.unheard, `${n.ident}@${n.freq_hz}@${n.lat}`, [n.lat, n.lon], 'u',
+        () => L.divIcon({ className: 'unheard-dot', iconSize: [6, 6], iconAnchor: [3, 3] }), tipUnheard(n), null, -1000);
+    }
+    sweep(stores.unheard, layers.unheard);
   }
 
   if (!fitted && pts.length >= 2) {
@@ -497,11 +634,14 @@ function renderMap() {
 }
 
 function focusOnMap(id) {
-  const m = heardMarkers.get(id);
-  if (!m || !map) return;
-  const ll = m.getLatLng();
-  if (!map.getBounds().pad(-0.1).contains(ll)) map.panTo(ll);
-  m.openPopup();
+  if (!map) return;
+  for (const [k, e] of stores.heard) {
+    if (!k.startsWith(`c${id}:`)) continue;
+    const ll = e.m.getLatLng();
+    if (!map.getBounds().pad(-0.1).contains(ll)) map.panTo(ll);
+    e.m.openTooltip();
+    return;
+  }
 }
 
 // ── Live copy ───────────────────────────────────────────────────────────────
