@@ -349,7 +349,12 @@ function clickSpec(view, e) {
 // label is part of each marker's icon, which leaves the tooltip free for the
 // detail shown on hover.
 
-let map = null, fitted = false, ringsFor = '', unheardSig = '';
+let map = null, ringsFor = '', unheardSig = '';
+// Autofit: keep the view framed on the receiver and the confirmed beacons,
+// re-fitting when that set changes. A move the user makes (or asks for, via
+// search or selecting a beacon) turns it off; `fitting` marks our own moves
+// so they don't count as the user's.
+let fitSig = '', fitting = false;
 const layers = {};                 // name -> L.LayerGroup
 const stores = { heard: new Map(), earlier: new Map(), unheard: new Map() };  // key -> { m, iconKey }
 let rxMarker = null;
@@ -383,6 +388,17 @@ function initMap() {
     if (e.target.checked) layers[layer].addTo(map); else map.removeLayer(layers[layer]);
   });
   bind('show-rings', 'rings');
+
+  const af = $('autofit');
+  try { const v = localStorage.getItem('ndb.autofit'); if (v !== null) af.checked = v === '1'; } catch (e) { /* storage unavailable */ }
+  af.addEventListener('change', () => {
+    try { localStorage.setItem('ndb.autofit', af.checked ? '1' : '0'); } catch (e) { /* storage unavailable */ }
+    fitSig = '';          // re-fit straight away when turned back on
+    renderMap();
+  });
+  const userMoved = () => { if (!fitting) setAutofit(false); };
+  map.on('dragstart', userMoved);
+  map.on('zoomstart', userMoved);
   const sel = $('earlier-window');
   try { const v = localStorage.getItem('ndb.earlierWindow'); if (v !== null) sel.value = v; } catch (e) { /* storage unavailable */ }
   sel.addEventListener('change', () => {
@@ -626,12 +642,26 @@ function renderMap() {
     sweep(stores.unheard, layers.unheard);
   }
 
-  if (!fitted && pts.length >= 2) {
-    map.fitBounds(L.latLngBounds(pts).pad(0.3), { maxZoom: 8 });
-    fitted = true;
-  } else if (!fitted && haveRx) {
-    map.setView([rx.lat, rx.lon], 6);
+  if ($('autofit').checked) {
+    const sig = pts.map((p) => p.join(',')).sort().join(';');
+    if (sig !== fitSig && pts.length) {
+      fitSig = sig;
+      fitting = true;
+      if (pts.length >= 2) map.fitBounds(L.latLngBounds(pts).pad(0.3), { maxZoom: 8 });
+      else map.setView(pts[0], 6);
+      // Leaflet fires its move/zoom events around the change; clear the flag
+      // once they have run.
+      setTimeout(() => { fitting = false; }, 400);
+    }
   }
+}
+
+function setAutofit(on) {
+  const af = $('autofit');
+  if (af.checked === on) return;
+  af.checked = on;
+  try { localStorage.setItem('ndb.autofit', on ? '1' : '0'); } catch (e) { /* storage unavailable */ }
+  if (on) { fitSig = ''; renderMap(); }
 }
 
 function focusOnMap(id) {
@@ -639,7 +669,7 @@ function focusOnMap(id) {
   for (const [k, e] of stores.heard) {
     if (!k.startsWith(`c${id}:`)) continue;
     const ll = e.m.getLatLng();
-    if (!map.getBounds().pad(-0.1).contains(ll)) map.panTo(ll);
+    if (!map.getBounds().pad(-0.1).contains(ll)) { setAutofit(false); map.panTo(ll); }
     e.m.openTooltip();
     return;
   }
@@ -797,6 +827,7 @@ function showHit(n) {
   searchPin = L.marker([n.lat, n.lon], { icon: ndbIcon('#e2e2e8', { solid: false, label: n.ident, labelClass: 'found' }), zIndexOffset: 1200 })
     .bindTooltip(tipUnheard(n), TIP).addTo(map);
   searchPin.on('mouseover', () => placeTip(searchPin));
+  setAutofit(false);   // the user asked to look somewhere specific
   map.flyTo([n.lat, n.lon], Math.max(map.getZoom(), 7), { duration: 0.8 });
   map.once('moveend', () => { placeTip(searchPin); searchPin.openTooltip(); });
   $('map-card').scrollIntoView({ behavior: 'smooth', block: 'center' });
