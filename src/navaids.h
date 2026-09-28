@@ -41,14 +41,21 @@ public:
     const std::vector<Navaid> &all() const { return navs_; }
 
     void set_receiver(double lat, double lon) { rx_lat_ = lat; rx_lon_ = lon; have_rx_ = true; }
+
+    // Only beacons within this distance of the receiver can be candidates or
+    // matches (<= 0: no limit; ignored until the receiver is known). An ident
+    // shared with a beacon on the far side of the world is far more likely a
+    // misread than a copy of it.
+    void set_max_km(double km) { max_km_ = km; }
+    double max_km() const { return max_km_; }
     bool have_receiver() const { return have_rx_; }
     double rx_lat() const { return rx_lat_; }
     double rx_lon() const { return rx_lon_; }
 
     NavaidHit locate(const Navaid &n) const;
 
-    // Published NDBs within tol_hz of freq_hz, nearest first (or closest in
-    // frequency first when the receiver position is unknown).
+    // Published NDBs within tol_hz of freq_hz and within max_km, nearest first
+    // (or closest in frequency first when the receiver position is unknown).
     std::vector<NavaidHit> candidates(double freq_hz, double tol_hz = 600.0) const;
 
     // The nearest candidate whose ident equals `ident`, or — if none — whose
@@ -60,6 +67,7 @@ private:
     std::vector<Navaid> navs_;  // sorted by frequency
     double rx_lat_ = 0.0, rx_lon_ = 0.0;
     bool have_rx_ = false;
+    double max_km_ = 0.0;
 };
 
 }  // namespace ndb

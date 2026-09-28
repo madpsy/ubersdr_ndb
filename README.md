@@ -112,7 +112,7 @@ Edit `~/ubersdr/ndb/docker-compose.yml`, then `./restart.sh`.
 | `NDB_SNR` | `10` | Carrier detection threshold, dB above the noise floor |
 | `NDB_ASSIST_KM` | `1500` | Published NDBs this close get a 7 dB threshold (0 = off) |
 | `NDB_MAX_CHANNELS` | `48` | Most beacons decoded at once, per stream. When all are taken, waiting carriers are admitted strongest first, and a channel gives up its slot if it never showed keying in a 3-minute trial, or last keyed over 30 minutes ago. Identified and pinned channels keep theirs. So every carrier gets a turn, and spurs can't crowd out beacons. |
-| `NDB_MAP_RADIUS_KM` | `2500` | Radius of the map's unheard-beacons layer |
+| `NDB_RADIUS_KM` | `2500` | Radius around the receiver. Decodes are only matched to published beacons inside it, since a shared ident far away is far more likely a misread. The map shows unheard beacons out to it. `0` = no limit. (`NDB_MAP_RADIUS_KM` is the older name and still works.) |
 | `NDB_SHOW_UNLISTED` | `0` | `1` also shows idents that match no published beacon on their frequency ("not in database"). Hidden by default: they're mostly misreads or repeating noise. They're still recorded, so enabling it later shows the history. |
 | `NDB_GGMORSE` | `auto` | ggmorse second decoder: `auto` (a pool for unidentified channels showing keying), `all` (every channel, ~10× the CPU), `off` |
 | `NDB_GGMORSE_SLOTS` | `6` | `auto`: ggmorse instances at once, per stream |
@@ -153,7 +153,7 @@ Plain `iq` (10 kHz) is not supported. It is too narrow to be worth it, and each 
 | `GET /api/spectrum` | averaged spectrum + floor per stream (2048 points) |
 | `GET /api/heard` | heard log |
 | `GET /api/decodes` | recent live copy |
-| `GET /api/navaids?max_km=…` | published NDBs in the covered band (default radius `NDB_MAP_RADIUS_KM`) |
+| `GET /api/navaids?max_km=…` | published NDBs in the covered band (default radius `NDB_RADIUS_KM`) |
 | `GET /api/search?q=…` | search the whole navaid list by ident, name or frequency, with live / heard / in-band status |
 
 ---

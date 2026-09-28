@@ -25,9 +25,11 @@ services:
       # Most beacons decoded at once, per stream. Each costs CPU; the default
       # stream sees ~40 carriers in the UK (NDBs plus local spurs).
       NDB_MAX_CHANNELS: "48"
-      # The map shows published beacons in the covered band out to this many
-      # km from the receiver, heard or not.
-      NDB_MAP_RADIUS_KM: "2500"
+      # Radius around the receiver, in km. A decode is only matched to a
+      # published beacon inside it (a shared ident on the far side of the
+      # world is far more likely a misread), and the map shows unheard
+      # beacons out to it. 0 = no limit.
+      NDB_RADIUS_KM: "2500"
       # Show idents that match no published beacon on their frequency ("not in
       # database"): mostly misreads or repeating noise, so hidden by default.
       NDB_SHOW_UNLISTED: "0"

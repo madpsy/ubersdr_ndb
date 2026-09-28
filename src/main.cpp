@@ -74,7 +74,9 @@ struct Options {
     std::string navaids_path;
     double      rx_lat = NAN, rx_lon = NAN;
     double      assist_km = 1500.0;  // published beacons this close get the lower detection threshold
-    double      map_km = 2500.0;     // the map's "unheard beacons" layer reaches this far
+    // Radius around the receiver: decodes are only matched to beacons inside
+    // it, and the map's unheard-beacons layer reaches this far.
+    double      map_km = 2500.0;
     // Show idents that match no published beacon on their frequency. Off by
     // default: most are misreads of a real ident or noise that happened to
     // repeat, and they clutter the table and log. Still recorded, so turning
@@ -124,7 +126,8 @@ void usage(const char *argv0)
         "  --lat DEG --lon DEG  receiver position (default: from UberSDR /api/description)\n"
         "  --assist-km KM     published beacons within KM get a lower detection threshold\n"
         "                     (default: 1500, 0 = off)\n"
-        "  --map-km KM        radius of the map's unheard-beacons layer (default: 2500)\n"
+        "  --radius-km KM     decodes are only matched to published beacons within KM,\n"
+        "                     and the map shows unheard ones out to KM (default: 2500, 0 = no limit)\n"
         "  --show-unlisted    also show idents that match no published beacon (default: hidden)\n"
         "  --data-dir DIR     keep the heard log in DIR/heard.tsv across restarts\n"
         "  --summary-every S  log the full beacon table every S seconds (default: 0 = off;\n"
@@ -210,7 +213,7 @@ bool parse_args(int argc, char **argv, Options &o)
         else if (a == "--lat")          o.rx_lat = atof(next("--lat").c_str());
         else if (a == "--lon")          o.rx_lon = atof(next("--lon").c_str());
         else if (a == "--assist-km")    o.assist_km = atof(next("--assist-km").c_str());
-        else if (a == "--map-km")       o.map_km = atof(next("--map-km").c_str());
+        else if (a == "--radius-km" || a == "--map-km") o.map_km = atof(next(a.c_str()).c_str());
         else if (a == "--show-unlisted") o.show_unlisted = true;
         else if (a == "--data-dir")     o.data_dir = next("--data-dir");
         else if (a == "--summary-every") o.summary_every = atoi(next("--summary-every").c_str());
@@ -526,7 +529,7 @@ std::string navaids_json(App &app, double max_km)
         for (auto &b : bands) in = in || (n.freq_hz >= b.first && n.freq_hz <= b.second);
         if (!in) continue;
         auto h = app.navaids.locate(n);
-        if (h.dist_km >= 0 && h.dist_km > max_km) continue;
+        if (max_km > 0 && h.dist_km >= 0 && h.dist_km > max_km) continue;
         if (!first) j += ",";
         first = false;
         j += navaid_json(h, false);
@@ -614,6 +617,8 @@ std::string heard_json(App &app)
     bool first = true;
     for (const auto &[key, e] : app.heard) {
         if (!e.confirmed && !app.o.show_unlisted) continue;
+        // Matched before the radius limited matching, and now outside it.
+        if (e.confirmed && app.o.map_km > 0 && e.dist_km > app.o.map_km) continue;
         if (!first) j += ",";
         first = false;
         j += "{\"key\":" + q(key) + ",\"ident\":" + q(e.ident) + ",\"confirmed\":" + (e.confirmed ? "true" : "false") +
@@ -1291,6 +1296,7 @@ int main(int argc, char **argv)
     ix::initNetSystem();
 
     if (o.navaids_path.empty()) o.navaids_path = default_navaids_path(argv[0]);
+    app.navaids.set_max_km(o.map_km);
     if (app.navaids.load(o.navaids_path))
         fprintf(stderr, "navaids: %zu NDBs from %s\n", app.navaids.size(), o.navaids_path.c_str());
     else

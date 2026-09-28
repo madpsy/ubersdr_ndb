@@ -102,7 +102,11 @@ std::vector<NavaidHit> NavaidDb::candidates(double freq_hz, double tol_hz) const
     std::vector<NavaidHit> out;
     auto lo = std::lower_bound(navs_.begin(), navs_.end(), freq_hz - tol_hz,
                                [](const Navaid &n, double f) { return n.freq_hz < f; });
-    for (auto it = lo; it != navs_.end() && it->freq_hz <= freq_hz + tol_hz; ++it) out.push_back(locate(*it));
+    for (auto it = lo; it != navs_.end() && it->freq_hz <= freq_hz + tol_hz; ++it) {
+        auto h = locate(*it);
+        if (max_km_ > 0 && h.dist_km > max_km_) continue;   // dist_km is -1 without a receiver
+        out.push_back(h);
+    }
     std::sort(out.begin(), out.end(), [&](const NavaidHit &a, const NavaidHit &b) {
         if (have_rx_) return a.dist_km < b.dist_km;
         return std::fabs(a.nav->freq_hz - freq_hz) < std::fabs(b.nav->freq_hz - freq_hz);
