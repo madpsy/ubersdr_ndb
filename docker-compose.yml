@@ -29,9 +29,11 @@ services:
       # published beacon inside it (a shared ident on the far side of the
       # world is far more likely a misread), and the map shows unheard
       # beacons out to it. 0 = no limit.
-      NDB_RADIUS_KM: "2500"
-      # Show idents that match no published beacon on their frequency ("not in
-      # database"): mostly misreads or repeating noise, so hidden by default.
+      NDB_RADIUS_KM: "2000"
+      # 0 (default): only the known list. Only carriers with a published
+      # beacon (within the radius) near their frequency are decoded, and only
+      # idents matching one are shown. 1: decode every carrier and show
+      # unmatched idents ("not in database") too; costs CPU on spurs.
       NDB_SHOW_UNLISTED: "0"
       # RECEIVER_LAT: ""       # override the position from UberSDR's /api/description
       # RECEIVER_LON: ""

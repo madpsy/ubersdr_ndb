@@ -13,8 +13,9 @@
 #                      threshold (default: 1500, 0 = off)
 #   NDB_RADIUS_KM      Decodes are only matched to published beacons within this
 #                      many km, and the map shows unheard ones out to it
-#                      (default: 2500, 0 = no limit)
-#   NDB_SHOW_UNLISTED  1 = also show idents that match no published beacon (default: hidden)
+#                      (default: 2000, 0 = no limit)
+#   NDB_SHOW_UNLISTED  1 = also decode carriers where no beacon is published, and show
+#                      idents that match none (default: the known list only)
 #   NDB_GGMORSE        ggmorse second decoder: auto (default) | all (~10x the CPU) | off
 #   NDB_GGMORSE_SLOTS  auto: ggmorse instances at once, per stream (default: 6)
 #   RECEIVER_LAT/LON   Override the receiver position from /api/description (optional)

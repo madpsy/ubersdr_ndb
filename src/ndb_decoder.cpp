@@ -50,6 +50,33 @@ void NdbDecoder::set_assist(const std::vector<double> &abs_hz)
     det_.set_assist(off);
 }
 
+void NdbDecoder::set_known(const std::vector<double> &abs_hz)
+{
+    known_.clear();
+    for (double f : abs_hz)
+        if (std::fabs(f - center_hz_) < 0.5 * fs_) known_.push_back(f - center_hz_);
+    std::sort(known_.begin(), known_.end());
+    if (!cfg_.known_only || known_.empty()) return;
+    for (auto it = channels_.begin(); it != channels_.end();) {
+        if (!(*it)->pinned() && !near_known((*it)->offset_hz())) {
+            ggm_since_.erase((*it)->id());
+            ggm_resting_.erase((*it)->id());
+            it = channels_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    pending_.erase(std::remove_if(pending_.begin(), pending_.end(),
+                                  [&](const Pending &p) { return !near_known(p.offset_hz); }),
+                   pending_.end());
+}
+
+bool NdbDecoder::near_known(double offset_hz) const
+{
+    auto it = std::lower_bound(known_.begin(), known_.end(), offset_hz - cfg_.known_tol_hz);
+    return it != known_.end() && *it <= offset_hz + cfg_.known_tol_hz;
+}
+
 void NdbDecoder::process_iq(const int16_t *iq, size_t n_pairs)
 {
     buf_.resize(n_pairs);
@@ -86,6 +113,8 @@ void NdbDecoder::on_detection()
             continue;
         }
         if (!cfg_.auto_detect) continue;
+        // Only carriers where a known beacon is published, unless asked for all.
+        if (cfg_.known_only && !known_.empty() && !near_known(c.offset_hz)) continue;
 
         // Pending candidate?
         auto it = std::find_if(pending_.begin(), pending_.end(), [&](const Pending &p) {

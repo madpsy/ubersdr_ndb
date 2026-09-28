@@ -76,7 +76,7 @@ struct Options {
     double      assist_km = 1500.0;  // published beacons this close get the lower detection threshold
     // Radius around the receiver: decodes are only matched to beacons inside
     // it, and the map's unheard-beacons layer reaches this far.
-    double      map_km = 2500.0;
+    double      map_km = 2000.0;
     // Show idents that match no published beacon on their frequency. Off by
     // default: most are misreads of a real ident or noise that happened to
     // repeat, and they clutter the table and log. Still recorded, so turning
@@ -127,8 +127,9 @@ void usage(const char *argv0)
         "  --assist-km KM     published beacons within KM get a lower detection threshold\n"
         "                     (default: 1500, 0 = off)\n"
         "  --radius-km KM     decodes are only matched to published beacons within KM,\n"
-        "                     and the map shows unheard ones out to KM (default: 2500, 0 = no limit)\n"
-        "  --show-unlisted    also show idents that match no published beacon (default: hidden)\n"
+        "                     and the map shows unheard ones out to KM (default: 2000, 0 = no limit)\n"
+        "  --show-unlisted    also decode carriers with no published beacon near their frequency,\n"
+        "                     and show idents that match none (default: known beacons only)\n"
         "  --data-dir DIR     keep the heard log in DIR/heard.tsv across restarts\n"
         "  --summary-every S  log the full beacon table every S seconds (default: 0 = off;\n"
         "                     --iq-file runs always print one at the end)\n"
@@ -551,6 +552,18 @@ std::vector<double> assist_freqs(App &app)
     return out;
 }
 
+// Published beacons that count as known: within the radius when the receiver
+// is known (all of them otherwise, or with radius 0).
+std::vector<double> known_freqs(App &app)
+{
+    std::vector<double> out;
+    std::lock_guard<std::mutex> nlk(app.navaids_mu);
+    const bool limit = app.navaids.have_receiver() && app.o.map_km > 0;
+    for (const auto &n : app.navaids.all())
+        if (!limit || app.navaids.locate(n).dist_km <= app.o.map_km) out.push_back(n.freq_hz);
+    return out;
+}
+
 // Fold the current identifications into the heard log. Called once a second.
 void update_heard(App &app)
 {
@@ -959,9 +972,13 @@ void fetch_receiver(App &app)
         // way round.)
         if (app.rx.have_pos) {
             auto freqs = assist_freqs(app);
+            auto known = known_freqs(app);
             for (auto &sp : app.streams) {
                 std::lock_guard<std::mutex> slk(sp->mu);
-                if (sp->dec) sp->dec->set_assist(freqs);
+                if (sp->dec) {
+                    sp->dec->set_assist(freqs);
+                    sp->dec->set_known(known);
+                }
             }
         }
     }
@@ -974,6 +991,7 @@ void fetch_receiver(App &app)
 // ---------------------------------------------------------------------------
 
 std::vector<double> assist_freqs(App &app);
+std::vector<double> known_freqs(App &app);
 
 struct IqSink {
     App &app;
@@ -998,6 +1016,7 @@ struct IqSink {
                     (st.spec.center_hz - 0.5 * rate) / 1e3, (st.spec.center_hz + 0.5 * rate) / 1e3);
             st.dec = std::make_unique<ndb::NdbDecoder>(st.spec.center_hz, double(rate), st.cfg);
             st.dec->set_assist(assist_freqs(app));
+            if (app.navaids.size() > 0) st.dec->set_known(known_freqs(app));
             const int base = st.index * 1000;
             App *a = &app;
             st.dec->on_decode = [a, base](int id, double f, const std::string &text) {
@@ -1391,6 +1410,11 @@ int main(int argc, char **argv)
     }
 
     load_heard(app);
+
+    // NDB_SHOW_UNLISTED off (the default) means "the known list only", for
+    // candidates as well as idents: carriers with no published beacon near
+    // their frequency get no channel.
+    o.dec.known_only = !o.show_unlisted;
 
     for (size_t i = 0; i < o.streams.size(); ++i) {
         auto s = std::make_unique<Stream>();

@@ -44,6 +44,11 @@ struct DecoderConfig {
     double active_hold_s = 1800.0;
     double cooldown_s = 600.0;
     bool   auto_detect    = true;
+    // Only give a channel to a carrier within known_tol_hz of a known
+    // (published) beacon frequency, once set_known() has supplied the list.
+    // Pinned frequencies are exempt.
+    bool   known_only     = true;
+    double known_tol_hz   = 300.0;
     // ggmorse as a second decoder. It costs ~10x the keying decoder, so by
     // default (Auto) a small pool of instances goes to the channels a second
     // opinion can help: unidentified, but showing some tone keying.
@@ -77,6 +82,11 @@ public:
     // threshold (see DetectorConfig::assist_snr_db).
     void set_assist(const std::vector<double> &abs_hz);
 
+    // Frequencies (absolute Hz) of the published beacons that count as known:
+    // with known_only, only carriers near one of these get a channel, and
+    // existing unpinned channels that aren't are dropped.
+    void set_known(const std::vector<double> &abs_hz);
+
     // Live decode feed: channel id, its frequency, and the new text.
     std::function<void(int, double, const std::string &)> on_decode;
 
@@ -101,6 +111,8 @@ private:
     std::vector<Recycled> recycled_;
     bool recently_recycled(double offset_hz) const;
     NdbChannel *recyclable();
+    bool near_known(double offset_hz) const;
+    std::vector<double> known_;   // sorted offsets; empty = no list yet (nothing filtered)
     int next_id_ = 1;
     double now_ = 0.0;
     uint64_t samples_ = 0;
