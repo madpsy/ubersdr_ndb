@@ -256,6 +256,8 @@ tbody tr.stale { opacity: 0.55; }
 @keyframes fresh { from { background: #00d4ff1f; } to { background: transparent; } }
 #heard-wrap { overflow: auto; max-height: 320px; }
 #heard td { cursor: default; }
+#heard tr[data-i] td { cursor: pointer; }
+#heard tr[data-i]:hover { background: var(--surface-2); }
 #heard .when { color: var(--muted); }
 
 .btn {
@@ -294,6 +296,7 @@ tbody tr.stale { opacity: 0.55; }
 .st.out { color: #6b6b7a; border: 1px solid var(--border); }
 
 .footnote { font-size: 11px; color: var(--muted); }
+.footnote code { font-family: var(--mono); font-size: 10.5px; }
 
 @media (max-width: 1000px) {
   #main-row, #log-row { flex-direction: column; }

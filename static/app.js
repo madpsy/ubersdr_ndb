@@ -664,15 +664,12 @@ function setAutofit(on) {
   if (on) { fitSig = ''; renderMap(); }
 }
 
+// Selecting a beacon in the table or spectrum: show its marker without
+// scrolling the page away from where the user clicked.
 function focusOnMap(id) {
   if (!map) return;
-  for (const [k, e] of stores.heard) {
-    if (!k.startsWith(`c${id}:`)) continue;
-    const ll = e.m.getLatLng();
-    if (!map.getBounds().pad(-0.1).contains(ll)) { setAutofit(false); map.panTo(ll); }
-    e.m.openTooltip();
-    return;
-  }
+  for (const [k, e] of stores.heard)
+    if (k.startsWith(`c${id}:`)) { flyToMarker(e.m, { scroll: false }); return; }
 }
 
 // ── Live copy ───────────────────────────────────────────────────────────────
@@ -752,7 +749,8 @@ function renderHeard() {
     $('heard-rows').innerHTML = '<tr><td colspan="7" class="empty">No beacons identified yet.</td></tr>';
     return;
   }
-  $('heard-rows').innerHTML = rows.map((e) => `<tr>
+  state.heardRows = rows;
+  $('heard-rows').innerHTML = rows.map((e, i) => `<tr${e.lat != null ? ` data-i="${i}" title="Show on the map"` : ''}>
     <td class="ident">${esc(e.ident)}${e.confirmed ? '<span class="badge ok">✓</span>' : ''}</td>
     <td class="station">${e.name ? `${esc(e.name)}<span class="cc">${flag(e.country)} ${esc(e.country)}</span>` : '<span class="guess">not in database</span>'}</td>
     <td class="freq">${(e.freq_hz / 1e3).toFixed(1)}</td>
@@ -818,20 +816,64 @@ async function runSearch() {
 // Show a search hit on the map: select its live channel if there is one,
 // otherwise fly there and drop a temporary marker with its tooltip.
 let searchPin = null;
-function showHit(n) {
-  closeSearch();
-  const ch = state.status?.channels.find((c) => c.navaid && c.navaid.ident === n.ident && Math.abs(c.navaid.freq_hz - n.freq_hz) < 1);
-  if (ch) { select(ch.id, 'search'); return; }
+// Fly to a marker and open its tooltip. The user asked to look at something
+// specific, so autofit steps aside. A tooltip opened from code stays open
+// until closed, so the previous one is closed first.
+let shownMarker = null;
+function flyToMarker(m, { scroll = true } = {}) {
+  setAutofit(false);
+  if (shownMarker && shownMarker !== m) shownMarker.closeTooltip();
+  shownMarker = m;
+  const ll = m.getLatLng();
+  const done = () => { placeTip(m); m.openTooltip(); };
+  if (map.getBounds().pad(-0.1).contains(ll)) done();
+  else { map.flyTo(ll, Math.max(map.getZoom(), 7), { duration: 0.8 }); map.once('moveend', done); }
+  if (scroll) $('map-card').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+// A temporary marker for something not otherwise on the map (a search hit,
+// or a heard-log entry outside the heard-earlier window). One at a time.
+function pinAt(lat, lon, ident, tipHtml) {
   if (!map) return;
   if (searchPin) map.removeLayer(searchPin);
-  searchPin = L.marker([n.lat, n.lon], { icon: ndbIcon('#e2e2e8', { solid: false, label: n.ident, labelClass: 'found' }), zIndexOffset: 1200 })
-    .bindTooltip(tipUnheard(n), TIP).addTo(map);
+  searchPin = L.marker([lat, lon], { icon: ndbIcon('#e2e2e8', { solid: false, label: ident, labelClass: 'found' }), zIndexOffset: 1200 })
+    .bindTooltip(tipHtml, TIP).addTo(map);
   searchPin.on('mouseover', () => placeTip(searchPin));
-  setAutofit(false);   // the user asked to look somewhere specific
-  map.flyTo([n.lat, n.lon], Math.max(map.getZoom(), 7), { duration: 0.8 });
-  map.once('moveend', () => { placeTip(searchPin); searchPin.openTooltip(); });
-  $('map-card').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  flyToMarker(searchPin);
 }
+
+// A live channel for this published beacon, if one is being received now.
+const liveChannelFor = (ident, freq_hz) =>
+  state.status?.channels.find((c) => c.navaid && c.navaid.ident === ident && Math.abs(c.navaid.freq_hz - freq_hz) < 1000);
+
+function showLive(ch, from) {
+  if (state.selected !== ch.id) select(ch.id, from);   // also focuses the marker
+  const e = [...stores.heard.entries()].find(([k]) => k.startsWith(`c${ch.id}:`));
+  if (e) flyToMarker(e[1].m);                         // and bring the map into view
+}
+
+function showHit(n) {
+  closeSearch();
+  const ch = liveChannelFor(n.ident, n.freq_hz);
+  if (ch) { showLive(ch, 'search'); return; }
+  pinAt(n.lat, n.lon, n.ident, tipUnheard(n));
+}
+
+// Heard-log row: the live marker if it's being received, else its
+// heard-earlier marker if that is on the map, else a temporary one.
+function showHeard(e) {
+  if (!map || e.lat == null) return;
+  const ch = liveChannelFor(e.ident, e.freq_hz);
+  if (ch) { showLive(ch, 'heard'); return; }
+  const earlier = stores.earlier.get(e.key);
+  if (earlier && map.hasLayer(layers.earlier)) { flyToMarker(earlier.m); return; }
+  pinAt(e.lat, e.lon, e.ident, tipEarlier(e));
+}
+
+$('heard-rows').addEventListener('click', (ev) => {
+  const tr = ev.target.closest('tr[data-i]');
+  if (tr) showHeard(state.heardRows[Number(tr.dataset.i)]);
+});
 
 $('search-open').addEventListener('click', openSearch);
 $('search-modal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeSearch(); });
