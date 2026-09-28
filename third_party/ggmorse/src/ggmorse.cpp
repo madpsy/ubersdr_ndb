@@ -691,12 +691,14 @@ void GGMorse::decode_float() {
         m_impl->filterHighPass.process(m_impl->waveform.data(), m_impl->samplesPerFrame);
     }
 
-    m_impl->stfft.process(m_impl->waveform.data(), m_impl->samplesPerFrame);
-
     auto frequency_hz = m_impl->parametersDecode.frequency_hz;
     auto speed_wpm    = m_impl->parametersDecode.speed_wpm;
 
+    // ubersdr_ndb: the spectrogram exists to find the pitch; with the pitch
+    // given, skip its FFT (~15% of a frame's cost). getSpectrogram() is then
+    // stale, which nothing here uses.
     if (frequency_hz <= 0.0f) {
+        m_impl->stfft.process(m_impl->waveform.data(), m_impl->samplesPerFrame);
         frequency_hz = m_impl->stfft.pitch(m_impl->parametersDecode.frequencyRangeMin_hz, m_impl->parametersDecode.frequencyRangeMax_hz);
     }
 

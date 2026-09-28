@@ -22,6 +22,10 @@
     </svg>
     <input type="text" id="search" placeholder="Filter beacons…" autocomplete="off" spellcheck="false">
   </div>
+  <button id="search-open" class="btn" title="Search every published NDB by ident, name or frequency (/)">
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><circle cx="6.5" cy="6.5" r="5" stroke="currentColor" stroke-width="1.5"/><line x1="10.5" y1="10.5" x2="14.5" y2="14.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    Find NDB
+  </button>
   <label class="toggle" title="Hide carriers with no decoded ident">
     <input type="checkbox" id="ident-only"> Identified only
   </label>
@@ -97,6 +101,19 @@
         <tbody id="heard-rows"><tr><td colspan="7" class="empty">No beacons identified yet.</td></tr></tbody>
       </table>
     </div>
+  </div>
+</div>
+
+<div id="search-modal" class="modal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="search-title">
+    <div class="modal-head">
+      <h2 id="search-title">Find an NDB</h2>
+      <button class="modal-x" data-close title="Close (Esc)">✕</button>
+    </div>
+    <input id="search-q" type="search" placeholder="Ident, name or frequency — e.g. EDN, Glasgow, 341" autocomplete="off" spellcheck="false">
+    <div id="search-meta" class="search-meta">Searches every published NDB in the OurAirports list, nearest first.</div>
+    <div id="search-results"></div>
   </div>
 </div>
 

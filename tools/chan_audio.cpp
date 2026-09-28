@@ -26,7 +26,7 @@ int main(int argc, char **argv)
     FILE *out = fopen(argv[5], "wb");
     if (!in || !out) { perror("open"); return 1; }
     std::vector<int16_t> pcm;
-    ndb::NdbChannel ch(1, centre, beacon - centre, fs, true, 0.0);
+    ndb::NdbChannel ch(1, centre, beacon - centre, fs, true, 0.0, true);
     // CHAN_PITCH / CHAN_WPM pin ggmorse, to separate pitch/speed-search
     // failures from everything upstream of it.
     const char *lp = getenv("CHAN_PITCH"), *lw = getenv("CHAN_WPM");

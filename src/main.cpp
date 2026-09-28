@@ -7,7 +7,7 @@
 // map) and a JSON API on a local port.
 //
 // Usage:
-//   ubersdr_ndb --url http://ubersdr:8080 --stream 359000:iq96 [--stream ...] [options]
+//   ubersdr_ndb --url http://ubersdr:8080 --stream 356000:iq192 [--stream ...] [options]
 //   ubersdr_ndb --iq-file capture.iq --rate 96000 --center 359000   (offline)
 //
 // Run with --help for the full option list.
@@ -74,6 +74,7 @@ struct Options {
     std::string navaids_path;
     double      rx_lat = NAN, rx_lon = NAN;
     double      assist_km = 1500.0;  // published beacons this close get the lower detection threshold
+    double      map_km = 2500.0;     // the map's "unheard beacons" layer reaches this far
     std::string data_dir;            // heard log persisted here ("" = memory only)
     int         summary_every = 0;   // seconds between beacon-table dumps to the log (0 = never)
     std::string dump_iq;        // write received IQ (int16 interleaved) here (first stream)
@@ -104,6 +105,10 @@ void usage(const char *argv0)
         "Decoder:\n"
         "  --ndb HZ           always decode this frequency (repeatable / comma-separated)\n"
         "  --no-auto          only decode --ndb frequencies, no carrier search\n"
+        "  --ggmorse MODE     ggmorse as a second decoder: auto (default) gives a small pool\n"
+        "                     to unidentified channels showing keying; all = every channel\n"
+        "                     (~10x the CPU); off = keying decoder only\n"
+        "  --ggmorse-slots N  auto: ggmorse instances at once, per stream (default: 6)\n"
         "  --snr DB           carrier detection threshold above floor (default: %.0f)\n"
         "  --max-channels N   cap on simultaneous beacons per stream (default: %d)\n"
         "  --drop-after S     forget a beacon unseen for S seconds (default: %.0f)\n"
@@ -114,6 +119,7 @@ void usage(const char *argv0)
         "  --lat DEG --lon DEG  receiver position (default: from UberSDR /api/description)\n"
         "  --assist-km KM     published beacons within KM get a lower detection threshold\n"
         "                     (default: 1500, 0 = off)\n"
+        "  --map-km KM        radius of the map's unheard-beacons layer (default: 2500)\n"
         "  --data-dir DIR     keep the heard log in DIR/heard.tsv across restarts\n"
         "  --summary-every S  log the full beacon table every S seconds (default: 0 = off;\n"
         "                     --iq-file runs always print one at the end)\n"
@@ -183,6 +189,14 @@ bool parse_args(int argc, char **argv, Options &o)
         else if (a == "--ndb")
             for (const auto &s : split(next("--ndb"), ',')) o.dec.pinned_hz.push_back(atof(s.c_str()));
         else if (a == "--no-auto")      o.dec.auto_detect = false;
+        else if (a == "--ggmorse") {
+            std::string m = next("--ggmorse");
+            if (m == "off") o.dec.ggmorse = ndb::DecoderConfig::Ggmorse::Off;
+            else if (m == "auto") o.dec.ggmorse = ndb::DecoderConfig::Ggmorse::Auto;
+            else if (m == "all") o.dec.ggmorse = ndb::DecoderConfig::Ggmorse::All;
+            else { fprintf(stderr, "error: --ggmorse must be off, auto or all\n"); return false; }
+        }
+        else if (a == "--ggmorse-slots") o.dec.ggm_slots = atoi(next("--ggmorse-slots").c_str());
         else if (a == "--snr")          o.dec.detector.snr_threshold_db = float(atof(next("--snr").c_str()));
         else if (a == "--max-channels") o.dec.max_channels = atoi(next("--max-channels").c_str());
         else if (a == "--drop-after")   o.dec.drop_after_s = atof(next("--drop-after").c_str());
@@ -190,6 +204,7 @@ bool parse_args(int argc, char **argv, Options &o)
         else if (a == "--lat")          o.rx_lat = atof(next("--lat").c_str());
         else if (a == "--lon")          o.rx_lon = atof(next("--lon").c_str());
         else if (a == "--assist-km")    o.assist_km = atof(next("--assist-km").c_str());
+        else if (a == "--map-km")       o.map_km = atof(next("--map-km").c_str());
         else if (a == "--data-dir")     o.data_dir = next("--data-dir");
         else if (a == "--summary-every") o.summary_every = atoi(next("--summary-every").c_str());
         else if (a == "--web-port")     o.web_port = atoi(next("--web-port").c_str());
@@ -328,6 +343,7 @@ std::string json_escape(const std::string &s)
 }
 
 std::string q(const std::string &s) { return "\"" + json_escape(s) + "\""; }
+std::string q_str(const std::string &s) { return q(s); }
 
 std::string num(double v, int places = 1)
 {
@@ -393,6 +409,7 @@ std::string status_json(App &app)
         j += "}";
     }
     j += ",\"navaids_loaded\":" + std::to_string(app.navaids.size());
+    j += ",\"map_km\":" + num(app.o.map_km, 0);
 
     std::vector<ChanOut> chans;
     j += ",\"streams\":[";
@@ -405,6 +422,7 @@ std::string status_json(App &app)
              ",\"message\":" + q(s.status_msg);
         if (s.dec) {
             j += ",\"sample_rate\":" + num(s.dec->sample_rate(), 0) + ",\"stream_time\":" + num(s.dec->stream_time());
+            j += ",\"waiting\":" + std::to_string(s.dec->waiting());
             for (auto &c : s.dec->snapshot()) chans.push_back({std::move(c), int(i)});
         }
         j += "}";
@@ -434,6 +452,7 @@ std::string status_json(App &app)
         j += ",\"pitch_hz\":" + num(c.pitch_hz, 0) + ",\"speed_wpm\":" + num(c.speed_wpm, 0) + ",\"cost\":" + num(c.cost, 3);
         j += ",\"ident\":" + q(c.ident) + ",\"ident_count\":" + std::to_string(c.ident_count);
         j += ",\"contrast_db\":" + num(c.contrast_db) + ",\"keying\":" + (c.keying ? "true" : "false");
+        j += ",\"ggmorse\":" + std::string(c.ggmorse ? "true" : "false");
         j += ",\"text\":" + q(c.text) + ",\"text_ggm\":" + q(c.text_ggm) + ",\"pinned\":" + (c.pinned ? "true" : "false");
         j += ",\"age_s\":" + num(c.age_s, 0) + ",\"last_seen_s\":" + num(c.last_seen_s, 0) +
              ",\"last_text_s\":" + num(c.last_text_s, 0);
@@ -678,6 +697,87 @@ std::vector<DecodeEvent> take_decodes(App &app)
         if (app.decodes_recent.size() > kRecent) app.decodes_recent.pop_front();
     }
     return out;
+}
+
+// Search the whole navaid list by ident, name, or frequency ("341", "341.5"),
+// and say for each hit whether it is live now, in the heard log, and inside
+// the spectrum being received. Ranked: exact ident, ident prefix, frequency,
+// name; then nearest first.
+std::string search_json(App &app, const std::string &query, size_t limit)
+{
+    std::string q;
+    for (char c : query)
+        if (!isspace((unsigned char)c) || !q.empty()) q += c;
+    while (!q.empty() && isspace((unsigned char)q.back())) q.pop_back();
+    std::string qu = q, ql = q;
+    for (char &c : qu) c = char(toupper((unsigned char)c));
+    for (char &c : ql) c = char(tolower((unsigned char)c));
+    char *endp = nullptr;
+    const double qkhz = q.empty() ? 0.0 : strtod(q.c_str(), &endp);
+    const bool is_freq = endp && *endp == 0 && qkhz >= 100.0 && qkhz <= 2000.0;
+
+    std::string out = "{\"type\":\"search\",\"query\":" + q_str(q) + ",\"results\":[";
+    if (q.empty()) return out + "]}";
+
+    // What is live, and what is in the heard log, keyed by ident.
+    std::map<std::string, std::pair<double, float>> live;   // ident -> freq, snr
+    std::vector<std::pair<double, double>> bands;
+    for (auto &sp : app.streams) {
+        std::lock_guard<std::mutex> lk(sp->mu);
+        if (!sp->dec) continue;
+        const double half = 0.45 * sp->dec->sample_rate();
+        bands.push_back({sp->spec.center_hz - half, sp->spec.center_hz + half});
+        std::lock_guard<std::mutex> nlk(app.navaids_mu);
+        for (const auto &c : sp->dec->snapshot()) {
+            bool exact = false;
+            auto m = app.navaids.match(c.freq_hz, c.ident, exact);
+            if (m.nav) live[m.nav->ident + "@" + std::to_string(long(m.nav->freq_hz))] = {c.freq_hz, c.snr_db};
+        }
+    }
+    std::map<std::string, HeardEntry> heard;
+    {
+        std::lock_guard<std::mutex> hlk(app.heard_mu);
+        for (const auto &[k, e] : app.heard)
+            if (e.confirmed) heard[e.ident + "@" + std::to_string(long(std::lround(e.freq_hz / 500.0) * 500))] = e;
+    }
+
+    struct Hit { int rank; double dist; ndb::NavaidHit h; };
+    std::vector<Hit> hits;
+    {
+        std::lock_guard<std::mutex> nlk(app.navaids_mu);
+        for (const auto &n : app.navaids.all()) {
+            std::string name = n.name;
+            for (char &c : name) c = char(tolower((unsigned char)c));
+            int rank = -1;
+            if (n.ident == qu) rank = 0;
+            else if (qu.size() >= 1 && n.ident.compare(0, qu.size(), qu) == 0) rank = 1;
+            else if (is_freq && std::fabs(n.freq_hz / 1e3 - qkhz) <= 0.5) rank = 2;
+            else if (ql.size() >= 2 && name.find(ql) != std::string::npos) rank = 3;
+            if (rank < 0) continue;
+            auto h = app.navaids.locate(n);
+            hits.push_back({rank, h.dist_km < 0 ? 1e9 : h.dist_km, h});
+        }
+    }
+    std::sort(hits.begin(), hits.end(), [](const Hit &a, const Hit &b) {
+        return a.rank != b.rank ? a.rank < b.rank : a.dist < b.dist;
+    });
+
+    for (size_t i = 0; i < hits.size() && i < limit; ++i) {
+        const auto &n = *hits[i].h.nav;
+        std::string j = navaid_json(hits[i].h, false);
+        j.pop_back();   // reopen the object to add status
+        bool in_band = false;
+        for (auto &b : bands) in_band = in_band || (n.freq_hz >= b.first && n.freq_hz <= b.second);
+        j += ",\"in_band\":" + std::string(in_band ? "true" : "false");
+        auto lv = live.find(n.ident + "@" + std::to_string(long(n.freq_hz)));
+        if (lv != live.end()) j += ",\"live\":{\"freq_hz\":" + num(lv->second.first) + ",\"snr_db\":" + num(lv->second.second) + "}";
+        auto hd = heard.find(n.ident + "@" + std::to_string(long(std::lround(n.freq_hz / 500.0) * 500)));
+        if (hd != heard.end())
+            j += ",\"heard\":{\"last_s\":" + std::to_string(hd->second.last_s) + ",\"first_s\":" +
+                 std::to_string(hd->second.first_s) + ",\"best_snr_db\":" + num(hd->second.best_snr_db) + "}";
+        out += (i ? "," : "") + j + "}";
+    }
+    return out + "],\"total\":" + std::to_string(hits.size()) + ",\"now\":" + std::to_string(now_ms() / 1000) + "}";
 }
 
 // ---------------------------------------------------------------------------
@@ -1036,6 +1136,19 @@ std::string content_type(const std::string &name)
     return "application/octet-stream";
 }
 
+std::string url_decode(const std::string &s)
+{
+    std::string o;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '+') o += ' ';
+        else if (s[i] == '%' && i + 2 < s.size() && isxdigit((unsigned char)s[i + 1]) && isxdigit((unsigned char)s[i + 2])) {
+            o += char(std::stoi(s.substr(i + 1, 2), nullptr, 16));
+            i += 2;
+        } else o += s[i];
+    }
+    return o;
+}
+
 std::string query_param(const std::string &uri, const std::string &key)
 {
     auto qp = uri.find('?');
@@ -1080,10 +1193,13 @@ std::unique_ptr<ix::HttpServer> start_web(App &app)
                 }
                 resp->headers["Content-Type"] = "application/json";
                 resp->body = decodes_json(recent, true);
+            } else if (api && leaf == "search") {
+                resp->headers["Content-Type"] = "application/json";
+                resp->body = search_json(app, url_decode(query_param(req->uri, "q")), 60);
             } else if (api && leaf == "navaids") {
                 std::string mk = query_param(req->uri, "max_km");
                 resp->headers["Content-Type"] = "application/json";
-                resp->body = navaids_json(app, mk.empty() ? 2500.0 : atof(mk.c_str()));
+                resp->body = navaids_json(app, mk.empty() ? app.o.map_km : atof(mk.c_str()));
             } else {
                 if (leaf.empty()) leaf = "index.html";
                 // Flat static directory; refuse anything that is not a plain file name.

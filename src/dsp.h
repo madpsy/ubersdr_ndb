@@ -121,13 +121,25 @@ public:
         if (++phase_ < d_) return false;
         phase_ = 0;
         // Oldest sample is at pos_, newest at pos_+n_-1.
-        const cf *p = &hist_[pos_];
-        float re = 0.f, im = 0.f;
-        for (size_t i = 0; i < n_; ++i) {
-            re += h_[i] * p[i].real();
-            im += h_[i] * p[i].imag();
+        // Four partial sums per component: without -ffast-math the compiler
+        // may not reorder one running sum, which serialises the loop on the
+        // add latency. Split, it vectorises. hist_ is complex<float>, i.e.
+        // interleaved re/im floats.
+        const float *p = reinterpret_cast<const float *>(&hist_[pos_]);
+        const float *h = h_.data();
+        float r0 = 0, r1 = 0, i0 = 0, i1 = 0;
+        size_t i = 0;
+        for (; i + 1 < n_; i += 2) {
+            r0 += h[i] * p[2 * i];
+            i0 += h[i] * p[2 * i + 1];
+            r1 += h[i + 1] * p[2 * i + 2];
+            i1 += h[i + 1] * p[2 * i + 3];
         }
-        out = cf(re, im);
+        for (; i < n_; ++i) {
+            r0 += h[i] * p[2 * i];
+            i0 += h[i] * p[2 * i + 1];
+        }
+        out = cf(r0 + r1, i0 + i1);
         return true;
     }
 
@@ -202,6 +214,31 @@ public:
 
 private:
     float b0_ = 1, b1_ = 0, b2_ = 0, a1_ = 0, a2_ = 0, z1_ = 0, z2_ = 0;
+};
+
+// RBJ-cookbook band-pass, 0 dB peak gain at fc. Real-valued.
+class BandPass {
+public:
+    void set(double fc, double bw_hz, double fs)
+    {
+        const double w = 2.0 * kPi * fc / fs, c = std::cos(w), q = fc / bw_hz, a = std::sin(w) / (2.0 * q);
+        const double a0 = 1.0 + a;
+        b0_ = float(a / a0);
+        b2_ = -b0_;
+        a1_ = float(-2.0 * c / a0);
+        a2_ = float((1.0 - a) / a0);
+    }
+
+    float process(float x)
+    {
+        float y = b0_ * x + z1_;
+        z1_ = -a1_ * y + z2_;
+        z2_ = b2_ * x - a2_ * y;
+        return y;
+    }
+
+private:
+    float b0_ = 1, b2_ = 0, a1_ = 0, a2_ = 0, z1_ = 0, z2_ = 0;
 };
 
 }  // namespace ndb

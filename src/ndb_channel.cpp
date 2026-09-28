@@ -29,7 +29,8 @@ constexpr float kSpeedMaxWpm  = 20.0f;
 
 }  // namespace
 
-NdbChannel::NdbChannel(int id, double center_hz, double offset_hz, double fs, bool pinned, double now_s)
+NdbChannel::NdbChannel(int id, double center_hz, double offset_hz, double fs, bool pinned, double now_s,
+                       bool use_ggmorse)
     : id_(id), center_hz_(center_hz), fs_(fs), pinned_(pinned),
       key_(kAudioRate), created_(now_s), last_seen_(now_s), now_(now_s)
 {
@@ -58,6 +59,22 @@ NdbChannel::NdbChannel(int id, double center_hz, double offset_hz, double fs, bo
     hp1_.set(250.0, kAudioRate);
     hp2_.set(250.0, kAudioRate);
 
+    if (use_ggmorse) set_ggmorse(true);
+}
+
+void NdbChannel::set_ggmorse(bool on)
+{
+    if (!on) {
+        ggm_.reset();
+        ggm_audio_.clear();
+        ggm_read_ = 0;
+        token_ggm_.clear();
+        bp_pitch_ = 0.0f;
+        ggm_wpm_ = 0.0f;
+        return;
+    }
+    if (ggm_) return;
+    last_tune_ = -1e9;
     GGMorse::Parameters p = GGMorse::getDefaultParameters();
     p.sampleRateInp   = float(kAudioRate);
     p.sampleRateOut   = float(kAudioRate);
@@ -88,11 +105,12 @@ void NdbChannel::retune(double offset_hz)
 
 void NdbChannel::lock(float pitch_hz, float speed_wpm)
 {
+    if (!ggm_) return;
     GGMorse::ParametersDecode dp = GGMorse::getDefaultParametersDecode();
     dp.frequency_hz = pitch_hz > 0 ? pitch_hz : -1.0f;
     dp.speed_wpm    = speed_wpm > 0 ? speed_wpm : -1.0f;
-    dp.frequencyRangeMin_hz = 300.0f;
-    dp.frequencyRangeMax_hz = 1200.0f;
+    dp.frequencyRangeMin_hz = pitch_hz > 0 ? std::max(200.0f, pitch_hz - 150.0f) : 300.0f;
+    dp.frequencyRangeMax_hz = pitch_hz > 0 ? std::min(1900.0f, pitch_hz + 150.0f) : 1200.0f;
     dp.speedRangeMin_wpm = kSpeedMinWpm;
     dp.speedRangeMax_wpm = kSpeedMaxWpm;
     ggm_->setParametersDecode(dp);
@@ -126,6 +144,7 @@ void NdbChannel::process(const cf *x, size_t n, double now_s)
         on_audio(std::clamp(a, -2.0f, 2.0f));
     }
     run_morse();
+    if (key_.keying() || (last_text_ >= 0 && now_s - last_text_ < 1.0)) last_active_ = now_s;
 }
 
 void NdbChannel::on_audio(float a)
@@ -134,27 +153,55 @@ void NdbChannel::on_audio(float a)
 }
 
 
+// Point ggmorse at what the keying decoder has learned. Called every few
+// seconds while attached: the tone estimate settles over the first spectra.
+void NdbChannel::tune_ggmorse()
+{
+    const float pitch = key_.pitch_hz();
+    if (pitch <= 0.0f) return;
+    const float wpm = key_.wpm();   // > 0 once a dit length is estimated
+    if (std::fabs(pitch - bp_pitch_) > 3.0f) {
+        // ±75 Hz: wide enough for a slightly drifting tone and its keying
+        // sidebands at ~10 wpm, narrow enough to shed most of the noise.
+        bp1_.set(pitch, 150.0, kAudioRate);
+        bp2_.set(pitch, 150.0, kAudioRate);
+        bp_pitch_ = pitch;
+    } else if (std::fabs(wpm - ggm_wpm_) < 0.5f) {
+        return;   // nothing changed
+    }
+    ggm_wpm_ = wpm;
+    lock(pitch, wpm);
+}
+
 void NdbChannel::run_morse()
 {
-    if (audio_.size() > tapped_) {
-        key_.process(audio_.data() + tapped_, audio_.size() - tapped_);
-        if (audio_tap) audio_tap(audio_.data() + tapped_, audio_.size() - tapped_);
-        tapped_ = audio_.size();
+    key_.process(audio_.data(), audio_.size());
+    if (audio_tap) audio_tap(audio_.data(), audio_.size());
+    if (!ggm_) {
+        audio_.clear();
+        return;
     }
+    if (now_ - last_tune_ >= 5.0) {
+        last_tune_ = now_;
+        tune_ggmorse();
+    }
+    // Until the tone is known, ggmorse gets the full audio and searches for it.
+    for (float a : audio_) ggm_audio_.push_back(bp_pitch_ > 0.0f ? bp2_.process(bp1_.process(a)) : a);
+    audio_.clear();
+
     // ggmorse pulls audio through a callback, asking for exactly one frame at
     // a time and stopping when the callback returns 0, so hand it whatever is
     // queued in whole frames and keep the remainder for next time.
     ggm_->decode([this](void *data, uint32_t n_bytes) -> uint32_t {
         const size_t need = n_bytes / sizeof(float);
-        if (audio_.size() - audio_read_ < need) return 0;
-        std::memcpy(data, audio_.data() + audio_read_, need * sizeof(float));
-        audio_read_ += need;
+        if (ggm_audio_.size() - ggm_read_ < need) return 0;
+        std::memcpy(data, ggm_audio_.data() + ggm_read_, need * sizeof(float));
+        ggm_read_ += need;
         return n_bytes;
     });
-    if (audio_read_ > 0) {
-        audio_.erase(audio_.begin(), audio_.begin() + long(audio_read_));
-        tapped_ -= audio_read_;
-        audio_read_ = 0;
+    if (ggm_read_ > 0) {
+        ggm_audio_.erase(ggm_audio_.begin(), ggm_audio_.begin() + long(ggm_read_));
+        ggm_read_ = 0;
     }
 
     // ggmorse appends to these on every frame for plotting and only empties
@@ -259,11 +306,11 @@ ChannelSnapshot NdbChannel::snapshot(double now_s) const
     s.carrier_db = dc_ > 0 ? 20.0f * std::log10(dc_) : -200.0f;
     // Tone and speed from the keying decoder once it has them — its pitch is
     // from a long averaged spectrum, and its speed is measured, not searched.
-    const auto &st = ggm_->getStatistics();
-    s.pitch_hz = key_.pitch_hz() > 0 ? key_.pitch_hz() : st.estimatedPitch_Hz;
+    s.pitch_hz = key_.pitch_hz() > 0 || !ggm_ ? key_.pitch_hz() : ggm_->getStatistics().estimatedPitch_Hz;
     s.speed_wpm = key_.keying() ? key_.wpm() : 0.0f;
     s.cost = cost_;
     s.contrast_db = key_.contrast_db();
+    s.ggmorse = ggm_ != nullptr;
     s.keying = key_.keying();
     s.text = text_;
     s.text_ggm = text_ggm_;

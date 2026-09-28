@@ -18,6 +18,7 @@
 #include "ndb_channel.h"
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -26,13 +27,33 @@ namespace ndb {
 
 struct DecoderConfig {
     DetectorConfig detector;
-    int    max_channels   = 24;
+    int    max_channels   = 48;     // a 192 kHz window over the UK sees ~40 carriers
     int    confirm_passes = 2;
     double match_hz       = 20.0;   // detection within this of a channel is that channel
     double retune_hz      = 1.0;    // follow the carrier if it moves more than this
     double drop_after_s   = 120.0;
     double drop_identified_after_s = 1800.0;  // an identified beacon survives fades this long
+    // With every slot taken, a channel that has shown no keying for this long
+    // gives its slot to the next waiting carrier, which then waits out a
+    // cooldown before it can take one back. So all carriers get a turn, and
+    // unkeyed spurs can't hold slots against real beacons.
+    // A channel that has shown keying at any point keeps its slot through
+    // silences up to active_hold_s (weak beacons fade in and out); only one
+    // that has never keyed is judged on the short trial.
+    double trial_s    = 180.0;
+    double active_hold_s = 1800.0;
+    double cooldown_s = 600.0;
     bool   auto_detect    = true;
+    // ggmorse as a second decoder. It costs ~10x the keying decoder, so by
+    // default (Auto) a small pool of instances goes to the channels a second
+    // opinion can help: unidentified, but showing some tone keying.
+    enum class Ggmorse { Off, Auto, All };
+    Ggmorse ggmorse     = Ggmorse::Auto;
+    int    ggm_slots    = 6;        // Auto: instances at once, per stream
+    float  ggm_min_contrast_db = 11.0f;  // some keying evidence (noise ~12, gate 15)
+    double ggm_min_age_s = 20.0;    // let the keying decoder measure first
+    double ggm_hold_s   = 300.0;    // give up on a channel after this long
+    double ggm_cooldown_s = 900.0;  // before the same channel can have one again
     std::vector<double> pinned_hz;  // absolute frequencies always decoded
 };
 
@@ -50,6 +71,7 @@ public:
     double sample_rate() const { return fs_; }
     double stream_time() const { return now_; }
     const std::vector<Carrier> &carriers() const { return det_.carriers(); }
+    size_t waiting() const { return pending_.size(); }   // detected carriers without a slot
 
     // Absolute frequencies of published beacons worth a lower detection
     // threshold (see DetectorConfig::assist_snr_db).
@@ -63,6 +85,9 @@ public:
 
 private:
     void on_detection();
+    void assign_ggmorse();
+    std::map<int, double> ggm_since_;     // channel id -> when ggmorse was attached
+    std::map<int, double> ggm_resting_;   // channel id -> when it was released unsuccessfully
     NdbChannel *add_channel(double offset_hz, bool pinned);
 
     double center_hz_;
@@ -70,8 +95,12 @@ private:
     DecoderConfig cfg_;
     CarrierDetector det_;
     std::vector<std::unique_ptr<NdbChannel>> channels_;
-    struct Pending { double offset_hz; int hits; bool hit_this_pass; };
+    struct Pending { double offset_hz; int hits; bool hit_this_pass; float snr_db; };
     std::vector<Pending> pending_;
+    struct Recycled { double offset_hz; double at; };
+    std::vector<Recycled> recycled_;
+    bool recently_recycled(double offset_hz) const;
+    NdbChannel *recyclable();
     int next_id_ = 1;
     double now_ = 0.0;
     uint64_t samples_ = 0;

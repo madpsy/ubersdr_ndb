@@ -45,6 +45,7 @@ struct ChannelSnapshot {
     float       speed_wpm = 0.0f;     // ggmorse estimate
     float       cost = 1.0f;          // ggmorse cost of the last decode (lower = better)
     float       contrast_db = 0.0f;   // tone on/off contrast (KeyingDecoder)
+    bool        ggmorse = false;      // a ggmorse instance is attached right now
     bool        keying = false;       // KeyingDecoder sees on/off keying
     std::string ident;                // most frequent repeated token, or ""
     int         ident_count = 0;      // how many times it was seen
@@ -58,7 +59,10 @@ struct ChannelSnapshot {
 
 class NdbChannel {
 public:
-    NdbChannel(int id, double center_hz, double offset_hz, double fs, bool pinned, double now_s);
+    // use_ggmorse: also run ggmorse as a second decoder feeding the ident
+    // tally. It is ~90% of the CPU of a channel, so it is optional.
+    NdbChannel(int id, double center_hz, double offset_hz, double fs, bool pinned, double now_s,
+               bool use_ggmorse = false);
     ~NdbChannel();
 
     NdbChannel(const NdbChannel &) = delete;
@@ -70,11 +74,21 @@ public:
     // Carrier moved (drift, or a better estimate): retune, phase-continuously.
     void retune(double offset_hz);
 
+    // Attach or detach ggmorse. Attaching starts it on audio from now on;
+    // detaching frees it (its copy so far stays in the tally).
+    void set_ggmorse(bool on);
+    bool ggmorse() const { return ggm_ != nullptr; }
+
     // Pin ggmorse's pitch and/or speed (<= 0 leaves that one on auto).
     void lock(float pitch_hz, float speed_wpm);
 
     // Called by the manager on each detection pass that finds this carrier.
     void seen(float snr_db, double now_s);
+
+    // Stream time this channel last showed tone keying (or copied text);
+    // -1 if never. The decoder recycles channels that have shown none.
+    double last_active_s() const { return last_active_; }
+    double created_s() const { return created_; }
 
     int    id() const { return id_; }
     double offset_hz() const { return rot_.freq(); }
@@ -113,9 +127,17 @@ private:
 
     // ggmorse and the audio queued for it.
     std::unique_ptr<GGMorse> ggm_;
-    std::vector<float> audio_;
-    size_t audio_read_ = 0;
-    size_t tapped_ = 0;
+    std::vector<float> audio_;       // this call's audio, for the keying decoder
+    std::vector<float> ggm_audio_;   // band-passed audio queued for ggmorse
+    size_t ggm_read_ = 0;
+    // ggmorse is handed what the keying decoder has learned: audio narrowed
+    // to the tone, and the pitch (and speed, when known) fixed, so it spends
+    // its effort on the one thing left to decide.
+    BandPass bp1_, bp2_;
+    float bp_pitch_ = 0.0f;
+    float ggm_wpm_ = 0.0f;
+    double last_tune_ = -1e9;
+    void tune_ggmorse();
 
     KeyingDecoder key_;
 
@@ -131,6 +153,7 @@ private:
     double created_ = 0.0;
     double last_seen_ = 0.0;
     double last_text_ = -1.0;
+    double last_active_ = -1.0;
     double now_ = 0.0;          // stream time of the last process() call
 };
 

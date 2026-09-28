@@ -4,13 +4,16 @@
 # Environment variables:
 #   UBERSDR_URL        UberSDR base URL (default: http://ubersdr:8080)
 #   PASS               UberSDR bypass password (wide IQ modes usually need one)
-#   NDB_STREAMS        IQ streams, comma-separated "centreHz:mode" (default: 359000:iq96)
+#   NDB_STREAMS        IQ streams, comma-separated "centreHz:mode" (default: 356000:iq192)
 #                      mode is iq48 | iq96 | iq192 | iq384 (±24 / ±48 / ±96 / ±192 kHz)
 #   NDB_PINNED         Frequencies in Hz always decoded, comma-separated (optional)
 #   NDB_SNR            Carrier detection threshold in dB above the floor (default: 10)
-#   NDB_MAX_CHANNELS   Cap on simultaneous beacons per stream (default: 24)
+#   NDB_MAX_CHANNELS   Cap on simultaneous beacons per stream (default: 48)
 #   NDB_ASSIST_KM      Published beacons within this range get a lower detection
 #                      threshold (default: 1500, 0 = off)
+#   NDB_MAP_RADIUS_KM  Radius of the map's unheard-beacons layer (default: 2500)
+#   NDB_GGMORSE        ggmorse second decoder: auto (default) | all (~10x the CPU) | off
+#   NDB_GGMORSE_SLOTS  auto: ggmorse instances at once, per stream (default: 6)
 #   RECEIVER_LAT/LON   Override the receiver position from /api/description (optional)
 #   MIN_MARGIN         Reduced-depth IQ margin in dB (default: 26, 0 = lossless, else 15-60)
 #   WEB_PORT           Web UI port (default: 6100)
@@ -22,7 +25,7 @@
 set -e
 
 URL="${UBERSDR_URL:-http://ubersdr:8080}"
-STREAMS="${NDB_STREAMS:-359000:iq96}"
+STREAMS="${NDB_STREAMS:-356000:iq192}"
 PORT="${WEB_PORT:-6100}"
 DATA="${DATA_DIR:-/data}"
 STATIC="${WEB_STATIC:-/usr/local/share/ubersdr_ndb/static}"
@@ -35,6 +38,9 @@ set -- --url "$URL" --stream "$STREAMS" --web-port "$PORT" --web-static "$STATIC
 [ -n "$NDB_SNR" ]          && set -- "$@" --snr "$NDB_SNR"
 [ -n "$NDB_MAX_CHANNELS" ] && set -- "$@" --max-channels "$NDB_MAX_CHANNELS"
 [ -n "$NDB_ASSIST_KM" ]    && set -- "$@" --assist-km "$NDB_ASSIST_KM"
+[ -n "$NDB_MAP_RADIUS_KM" ] && set -- "$@" --map-km "$NDB_MAP_RADIUS_KM"
+[ -n "$NDB_GGMORSE" ]      && set -- "$@" --ggmorse "$NDB_GGMORSE"
+[ -n "$NDB_GGMORSE_SLOTS" ] && set -- "$@" --ggmorse-slots "$NDB_GGMORSE_SLOTS"
 [ -n "$RECEIVER_LAT" ]     && set -- "$@" --lat "$RECEIVER_LAT"
 [ -n "$RECEIVER_LON" ]     && set -- "$@" --lon "$RECEIVER_LON"
 [ -n "$MIN_MARGIN" ]       && set -- "$@" --min-margin "$MIN_MARGIN"

@@ -1,5 +1,6 @@
 # Build artefacts
 build/
+build-*/
 IXWebSocket/
 navaids.csv
 

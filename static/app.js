@@ -118,6 +118,7 @@ function renderTable() {
     else if (id.kind === 'near') identCell = `${esc(id.label)}<span class="badge near" title="Decoded ${esc(c.ident)} — all but the last letter">≈</span>`;
     else if (id.kind === 'decoded') identCell = `${esc(id.label)}<span class="badge n" title="Not in the beacon database on this frequency">×${c.ident_count}</span>`;
     else identCell = '<span class="none">…</span>';
+    if (c.ggmorse) identCell += '<span class="badge g" title="ggmorse is assisting: a second decoder, given to a few unidentified channels that show keying">2nd</span>';
 
     let station = '', dist = '';
     if (id.nav) {
@@ -732,6 +733,93 @@ function renderHeard() {
   </tr>`).join('');
 }
 
+// ── Search ──────────────────────────────────────────────────────────────────
+//
+// Server-side over the whole navaid list (api/search), so it finds beacons
+// far outside the band or the map radius too. Debounced: every keystroke
+// would otherwise spend the proxy's per-minute request allowance.
+
+let searchTimer = null, searchSeq = 0, searchHits = [];
+
+function openSearch() {
+  $('search-modal').hidden = false;
+  const q = $('search-q');
+  q.focus();
+  q.select();
+}
+function closeSearch() { $('search-modal').hidden = true; }
+
+async function runSearch() {
+  const q = $('search-q').value.trim();
+  const seq = ++searchSeq;
+  if (!q) {
+    searchHits = [];
+    $('search-meta').textContent = 'Searches every published NDB in the OurAirports list, nearest first.';
+    $('search-results').innerHTML = '';
+    return;
+  }
+  try {
+    const r = await (await fetch('api/search?q=' + encodeURIComponent(q))).json();
+    if (seq !== searchSeq) return;   // a newer query is already on its way
+    searchHits = r.results;
+    const more = r.total > r.results.length ? ` (showing ${r.results.length})` : '';
+    $('search-meta').textContent = r.total ? `${r.total} match${r.total === 1 ? '' : 'es'}${more} — click one to show it on the map` : 'No published NDB matches.';
+    $('search-results').innerHTML = r.results.length ? `<table><thead><tr>
+        <th>Ident</th><th>Name</th><th>kHz</th><th class="num">Distance</th><th>Power</th><th>Status</th>
+      </tr></thead><tbody>${r.results.map((n, i) => {
+        let st;
+        if (n.live) st = `<span class="st live" title="Being received now">live · ${n.live.snr_db.toFixed(0)} dB</span>`;
+        else if (n.heard) st = `<span class="st heard" title="Last heard ${utcDate(n.heard.last_s)}">heard ${ago(n.heard.last_s)}</span>`;
+        else if (n.in_band) st = '<span class="st band" title="Inside a stream being decoded, not heard yet">in band</span>';
+        else st = '<span class="st out" title="Outside every stream being decoded">not covered</span>';
+        return `<tr data-i="${i}">
+          <td class="ident">${esc(n.ident)}</td>
+          <td class="station">${esc(n.name)}<span class="cc">${flag(n.country)} ${esc(n.country)}</span></td>
+          <td class="freq">${(n.freq_hz / 1e3).toFixed(1)}</td>
+          <td class="num dist">${n.dist_km != null ? `${n.dist_km} km<span class="brg">${compass(n.bearing_deg)}</span>` : '–'}</td>
+          <td>${esc(power(n.power))}</td>
+          <td>${st}</td></tr>`;
+      }).join('')}</tbody></table>` : '';
+  } catch (e) {
+    if (seq === searchSeq) $('search-meta').textContent = 'Search failed — no response from the addon.';
+  }
+}
+
+// Show a search hit on the map: select its live channel if there is one,
+// otherwise fly there and drop a temporary marker with its tooltip.
+let searchPin = null;
+function showHit(n) {
+  closeSearch();
+  const ch = state.status?.channels.find((c) => c.navaid && c.navaid.ident === n.ident && Math.abs(c.navaid.freq_hz - n.freq_hz) < 1);
+  if (ch) { select(ch.id, 'search'); return; }
+  if (!map) return;
+  if (searchPin) map.removeLayer(searchPin);
+  searchPin = L.marker([n.lat, n.lon], { icon: ndbIcon('#e2e2e8', { solid: false, label: n.ident, labelClass: 'found' }), zIndexOffset: 1200 })
+    .bindTooltip(tipUnheard(n), TIP).addTo(map);
+  searchPin.on('mouseover', () => placeTip(searchPin));
+  map.flyTo([n.lat, n.lon], Math.max(map.getZoom(), 7), { duration: 0.8 });
+  map.once('moveend', () => { placeTip(searchPin); searchPin.openTooltip(); });
+  $('map-card').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+$('search-open').addEventListener('click', openSearch);
+$('search-modal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeSearch(); });
+$('search-q').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 300); });
+$('search-q').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && searchHits.length) showHit(searchHits[0]);
+});
+$('search-results').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-i]');
+  if (tr) showHit(searchHits[Number(tr.dataset.i)]);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('search-modal').hidden) closeSearch();
+  else if (e.key === '/' && $('search-modal').hidden && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) {
+    e.preventDefault();
+    openSearch();
+  }
+});
+
 // ── Data ────────────────────────────────────────────────────────────────────
 
 async function refreshNavaids() {
@@ -741,7 +829,7 @@ async function refreshNavaids() {
   if (key === state.navaidsKey || !s.streams.some((x) => x.sample_rate)) return;
   state.navaidsKey = key;
   try {
-    const r = await fetch('api/navaids?max_km=2500');
+    const r = await fetch('api/navaids');   // radius: NDB_MAP_RADIUS_KM, server side
     state.navaids = (await r.json()).navaids || [];
     renderMap();
   } catch (e) { state.navaidsKey = ''; }

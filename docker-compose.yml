@@ -11,22 +11,32 @@ services:
       # UberSDR session. Every NDB carrier inside a stream is found and decoded.
       #   iq48  = ±24 kHz   iq96 = ±48 kHz   iq192 = ±96 kHz   iq384 = ±192 kHz
       # (the outer 5% each side is ignored, where the passband rolls off)
-      # The default covers ~316-402 kHz: of the NDBs in the navaid list, that
-      # window holds 93 of the 110 in the UK and Ireland (incl. 399-401 kHz).
-      # To cover the whole European NDB band
-      # (roughly 255-526 kHz), for example:
-      #   NDB_STREAMS: "300000:iq96,390000:iq96,480000:iq96"
-      NDB_STREAMS: "359000:iq96"
+      # The default, one iq192 stream at 356 kHz, covers ~270-442 kHz: every
+      # NDB in the UK and Ireland in the navaid list except Lichfield (545 kHz).
+      # To add Lichfield too (2 sessions, 240 kHz of IQ in total):
+      #   NDB_STREAMS: "356000:iq192,545000:iq48"
+      # Wide modes (iq192/iq384) may need PASS below.
+      NDB_STREAMS: "356000:iq192"
       # Uncomment and set as needed:
       # PASS: ""               # UberSDR bypass password — wide IQ modes usually need one
       # NDB_PINNED: ""         # Hz, comma-separated: always decode these, even unseen
       # NDB_SNR: "10"          # carrier detection threshold, dB above the noise floor
       # NDB_ASSIST_KM: "1500"  # published beacons this close get a lower threshold (7 dB)
-      # NDB_MAX_CHANNELS: "24" # per stream
+      # Most beacons decoded at once, per stream. Each costs CPU; the default
+      # stream sees ~40 carriers in the UK (NDBs plus local spurs).
+      NDB_MAX_CHANNELS: "48"
+      # The map shows published beacons in the covered band out to this many
+      # km from the receiver, heard or not.
+      NDB_MAP_RADIUS_KM: "2500"
       # RECEIVER_LAT: ""       # override the position from UberSDR's /api/description
       # RECEIVER_LON: ""
       # MIN_MARGIN: "26"       # reduced-depth IQ, dB below the band noise (0 = lossless)
       # NDB_LOG_SUMMARY: "120" # log the full beacon table every N seconds (debugging)
+      # ggmorse, a second Morse decoder, runs on a small pool of channels at a
+      # time: unidentified ones that show some keying. "all" runs it on every
+      # channel (~10x the CPU), "off" never.
+      # NDB_GGMORSE: "auto"
+      # NDB_GGMORSE_SLOTS: "6"   # per stream
       # WEB_PORT: "6100"
     volumes:
       # Heard log (heard.tsv): every beacon ever identified, kept across restarts

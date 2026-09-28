@@ -26,3 +26,7 @@ Not a change to ggmorse, but a requirement on its caller: `thresholdF` (and
 `signalF`) grow by one entry per decoded frame until drained with
 `takeThresholdF()` / `takeSignalF()`. A long-running decoder must drain them;
 `NdbChannel::run_morse()` does.
+
+Local change (CPU): with `frequency_hz` given, `decode_float()` skips the
+short-time FFT, which only serves the pitch search. `getSpectrogram()` is
+then not updated.
