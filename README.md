@@ -113,6 +113,7 @@ Edit `~/ubersdr/ndb/docker-compose.yml`, then `./restart.sh`.
 | `NDB_ASSIST_KM` | `1500` | Published NDBs this close get a 7 dB threshold (0 = off) |
 | `NDB_MAX_CHANNELS` | `48` | Most beacons decoded at once, per stream. When all are taken, waiting carriers are admitted strongest first, and a channel gives up its slot if it never showed keying in a 3-minute trial, or last keyed over 30 minutes ago. Identified and pinned channels keep theirs. So every carrier gets a turn, and spurs can't crowd out beacons. |
 | `NDB_MAP_RADIUS_KM` | `2500` | Radius of the map's unheard-beacons layer |
+| `NDB_SHOW_UNLISTED` | `0` | `1` also shows idents that match no published beacon on their frequency ("not in database"). Hidden by default: they're mostly misreads or repeating noise. They're still recorded, so enabling it later shows the history. |
 | `NDB_GGMORSE` | `auto` | ggmorse second decoder: `auto` (a pool for unidentified channels showing keying), `all` (every channel, ~10× the CPU), `off` |
 | `NDB_GGMORSE_SLOTS` | `6` | `auto`: ggmorse instances at once, per stream |
 | `RECEIVER_LAT` / `RECEIVER_LON` | from UberSDR | Override the receiver position |

@@ -75,6 +75,11 @@ struct Options {
     double      rx_lat = NAN, rx_lon = NAN;
     double      assist_km = 1500.0;  // published beacons this close get the lower detection threshold
     double      map_km = 2500.0;     // the map's "unheard beacons" layer reaches this far
+    // Show idents that match no published beacon on their frequency. Off by
+    // default: most are misreads of a real ident or noise that happened to
+    // repeat, and they clutter the table and log. Still recorded, so turning
+    // this on later shows the full history.
+    bool        show_unlisted = false;
     std::string data_dir;            // heard log persisted here ("" = memory only)
     int         summary_every = 0;   // seconds between beacon-table dumps to the log (0 = never)
     std::string dump_iq;        // write received IQ (int16 interleaved) here (first stream)
@@ -120,6 +125,7 @@ void usage(const char *argv0)
         "  --assist-km KM     published beacons within KM get a lower detection threshold\n"
         "                     (default: 1500, 0 = off)\n"
         "  --map-km KM        radius of the map's unheard-beacons layer (default: 2500)\n"
+        "  --show-unlisted    also show idents that match no published beacon (default: hidden)\n"
         "  --data-dir DIR     keep the heard log in DIR/heard.tsv across restarts\n"
         "  --summary-every S  log the full beacon table every S seconds (default: 0 = off;\n"
         "                     --iq-file runs always print one at the end)\n"
@@ -205,6 +211,7 @@ bool parse_args(int argc, char **argv, Options &o)
         else if (a == "--lon")          o.rx_lon = atof(next("--lon").c_str());
         else if (a == "--assist-km")    o.assist_km = atof(next("--assist-km").c_str());
         else if (a == "--map-km")       o.map_km = atof(next("--map-km").c_str());
+        else if (a == "--show-unlisted") o.show_unlisted = true;
         else if (a == "--data-dir")     o.data_dir = next("--data-dir");
         else if (a == "--summary-every") o.summary_every = atoi(next("--summary-every").c_str());
         else if (a == "--web-port")     o.web_port = atoi(next("--web-port").c_str());
@@ -447,20 +454,23 @@ std::string status_json(App &app)
         const auto &c = co.c;
         if (!first) j += ",";
         first = false;
+        // Name it: the published NDB whose ident matches what was decoded.
+        bool exact = false;
+        auto m = app.navaids.match(c.freq_hz, c.ident, exact);
+        // An ident matching nothing published is withheld unless asked for
+        // (see Options::show_unlisted); the carrier and its copy still show.
+        const bool hide_ident = !m.nav && !app.o.show_unlisted;
         j += "{\"id\":" + std::to_string(co.stream * 1000 + c.id) + ",\"stream\":" + std::to_string(co.stream);
         j += ",\"freq_hz\":" + num(c.freq_hz) + ",\"snr_db\":" + num(c.snr_db) + ",\"carrier_db\":" + num(c.carrier_db);
         j += ",\"pitch_hz\":" + num(c.pitch_hz, 0) + ",\"speed_wpm\":" + num(c.speed_wpm, 0) + ",\"cost\":" + num(c.cost, 3);
-        j += ",\"ident\":" + q(c.ident) + ",\"ident_count\":" + std::to_string(c.ident_count);
+        j += ",\"ident\":" + q(hide_ident ? "" : c.ident) + ",\"ident_count\":" + std::to_string(hide_ident ? 0 : c.ident_count);
         j += ",\"contrast_db\":" + num(c.contrast_db) + ",\"keying\":" + (c.keying ? "true" : "false");
         j += ",\"ggmorse\":" + std::string(c.ggmorse ? "true" : "false");
         j += ",\"text\":" + q(c.text) + ",\"text_ggm\":" + q(c.text_ggm) + ",\"pinned\":" + (c.pinned ? "true" : "false");
         j += ",\"age_s\":" + num(c.age_s, 0) + ",\"last_seen_s\":" + num(c.last_seen_s, 0) +
              ",\"last_text_s\":" + num(c.last_text_s, 0);
 
-        // Name it: the published NDB whose ident matches what was decoded,
-        // else the nearest few on this frequency as candidates.
-        bool exact = false;
-        auto m = app.navaids.match(c.freq_hz, c.ident, exact);
+        // ... else the nearest few published on this frequency as candidates.
         if (m.nav) j += ",\"navaid\":" + navaid_json(m, exact);
         auto cands = app.navaids.candidates(c.freq_hz);
         j += ",\"candidates\":[";
@@ -566,8 +576,9 @@ void update_heard(App &app)
         auto &e = app.heard[key];
         if (e.first_s == 0) {
             e.first_s = now;
-            fprintf(stderr, "heard: %s %.1f Hz%s\n", ident.c_str(), c.freq_hz,
-                    m.nav ? (" — " + m.nav->name + " " + m.nav->country).c_str() : " (not in database)");
+            if (m.nav || app.o.show_unlisted)
+                fprintf(stderr, "heard: %s %.1f Hz%s\n", ident.c_str(), c.freq_hz,
+                        m.nav ? (" — " + m.nav->name + " " + m.nav->country).c_str() : " (not in database)");
         }
         e.ident = ident;
         e.confirmed = m.nav != nullptr;
@@ -602,6 +613,7 @@ std::string heard_json(App &app)
     std::string j = "{\"type\":\"heard\",\"now\":" + std::to_string(now_ms() / 1000) + ",\"entries\":[";
     bool first = true;
     for (const auto &[key, e] : app.heard) {
+        if (!e.confirmed && !app.o.show_unlisted) continue;
         if (!first) j += ",";
         first = false;
         j += "{\"key\":" + q(key) + ",\"ident\":" + q(e.ident) + ",\"confirmed\":" + (e.confirmed ? "true" : "false") +

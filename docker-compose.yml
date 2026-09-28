@@ -28,6 +28,9 @@ services:
       # The map shows published beacons in the covered band out to this many
       # km from the receiver, heard or not.
       NDB_MAP_RADIUS_KM: "2500"
+      # Show idents that match no published beacon on their frequency ("not in
+      # database"): mostly misreads or repeating noise, so hidden by default.
+      NDB_SHOW_UNLISTED: "0"
       # RECEIVER_LAT: ""       # override the position from UberSDR's /api/description
       # RECEIVER_LON: ""
       # MIN_MARGIN: "26"       # reduced-depth IQ, dB below the band noise (0 = lossless)

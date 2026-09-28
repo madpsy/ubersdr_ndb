@@ -12,6 +12,7 @@
 #   NDB_ASSIST_KM      Published beacons within this range get a lower detection
 #                      threshold (default: 1500, 0 = off)
 #   NDB_MAP_RADIUS_KM  Radius of the map's unheard-beacons layer (default: 2500)
+#   NDB_SHOW_UNLISTED  1 = also show idents that match no published beacon (default: hidden)
 #   NDB_GGMORSE        ggmorse second decoder: auto (default) | all (~10x the CPU) | off
 #   NDB_GGMORSE_SLOTS  auto: ggmorse instances at once, per stream (default: 6)
 #   RECEIVER_LAT/LON   Override the receiver position from /api/description (optional)
@@ -40,6 +41,7 @@ set -- --url "$URL" --stream "$STREAMS" --web-port "$PORT" --web-static "$STATIC
 [ -n "$NDB_ASSIST_KM" ]    && set -- "$@" --assist-km "$NDB_ASSIST_KM"
 [ -n "$NDB_MAP_RADIUS_KM" ] && set -- "$@" --map-km "$NDB_MAP_RADIUS_KM"
 [ -n "$NDB_GGMORSE" ]      && set -- "$@" --ggmorse "$NDB_GGMORSE"
+case "$NDB_SHOW_UNLISTED" in 1|true|yes) set -- "$@" --show-unlisted ;; esac
 [ -n "$NDB_GGMORSE_SLOTS" ] && set -- "$@" --ggmorse-slots "$NDB_GGMORSE_SLOTS"
 [ -n "$RECEIVER_LAT" ]     && set -- "$@" --lat "$RECEIVER_LAT"
 [ -n "$RECEIVER_LON" ]     && set -- "$@" --lon "$RECEIVER_LON"
