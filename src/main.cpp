@@ -632,6 +632,66 @@ std::string heard_json(App &app)
     return j + "]}";
 }
 
+// Beacons identified within the last max_age_s seconds, most recent first:
+// the small, pollable answer to "what is being heard?". Built from the heard
+// log (which update_heard() refreshes every second from the live channels),
+// plus current SNR for those live right now. Same visibility as the UI:
+// unlisted idents only with show_unlisted, and nothing outside the radius.
+std::string beacons_json(App &app, long max_age_s)
+{
+    const int64_t now = now_ms() / 1000;
+
+    // Live SNR, keyed like the heard log.
+    std::map<std::string, float> live_snr;
+    for (auto &sp : app.streams) {
+        std::vector<ndb::ChannelSnapshot> snaps;
+        {
+            std::lock_guard<std::mutex> lk(sp->mu);
+            if (sp->dec) snaps = sp->dec->snapshot();
+        }
+        std::lock_guard<std::mutex> nlk(app.navaids_mu);
+        for (const auto &c : snaps) {
+            if (c.ident.empty() || c.last_seen_s >= 60) continue;
+            bool exact = false;
+            auto m = app.navaids.match(c.freq_hz, c.ident, exact);
+            char key[64];
+            snprintf(key, sizeof key, "%s@%.1f", (m.nav ? m.nav->ident : c.ident).c_str(),
+                     (m.nav ? m.nav->freq_hz : c.freq_hz) / 1e3);
+            live_snr[key] = c.snr_db;
+        }
+    }
+
+    std::vector<std::pair<std::string, HeardEntry>> rows;
+    {
+        std::lock_guard<std::mutex> hlk(app.heard_mu);
+        for (const auto &[key, e] : app.heard) {
+            if (now - e.last_s > max_age_s) continue;
+            if (!e.confirmed && !app.o.show_unlisted) continue;
+            if (e.confirmed && app.o.map_km > 0 && e.dist_km > app.o.map_km) continue;
+            rows.push_back({key, e});
+        }
+    }
+    std::sort(rows.begin(), rows.end(), [](const auto &a, const auto &b) { return a.second.last_s > b.second.last_s; });
+
+    std::string j = "{\"now\":" + std::to_string(now) + ",\"max_age\":" + std::to_string(max_age_s) +
+                    ",\"count\":" + std::to_string(rows.size()) + ",\"beacons\":[";
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const auto &[key, e] = rows[i];
+        auto lv = live_snr.find(key);
+        if (i) j += ",";
+        j += "{\"ident\":" + q(e.ident) + ",\"confirmed\":" + (e.confirmed ? "true" : "false") +
+             ",\"name\":" + q(e.name) + ",\"country\":" + q(e.country) + ",\"freq_hz\":" + num(e.freq_hz) +
+             ",\"lat\":" + (e.confirmed ? num(e.lat, 4) : "null") + ",\"lon\":" + (e.confirmed ? num(e.lon, 4) : "null") +
+             ",\"dist_km\":" + (e.dist_km >= 0 ? num(e.dist_km, 0) : "null") +
+             ",\"bearing_deg\":" + (e.bearing_deg >= 0 ? num(e.bearing_deg, 0) : "null") +
+             ",\"first_heard\":" + std::to_string(e.first_s) + ",\"last_heard\":" + std::to_string(e.last_s) +
+             ",\"age_s\":" + std::to_string(now - e.last_s) + ",\"best_snr_db\":" + num(e.best_snr_db) +
+             ",\"live\":" + (lv != live_snr.end() ? "true" : "false") +
+             ",\"snr_db\":" + (lv != live_snr.end() ? num(lv->second) : "null") + "}";
+    }
+    return j + "]}";
+}
+
 // heard.tsv: one entry per line, tab-separated, in HeardEntry field order.
 // Plain text rather than JSON so reading it back needs no parser.
 void save_heard(App &app)
@@ -1210,6 +1270,27 @@ std::unique_ptr<ix::HttpServer> start_web(App &app)
                 }
                 resp->headers["Content-Type"] = "application/json";
                 resp->body = decodes_json(recent, true);
+            } else if (api && leaf == "beacons") {
+                // max_age: whole seconds, 1..604800 (7 days); default 300.
+                // Anything else is refused rather than clamped, so a caller's
+                // mistake is visible instead of quietly answered differently.
+                constexpr long kMaxAgeLimit = 604800;
+                const std::string raw = query_param(req->uri, "max_age");
+                long max_age = 300;
+                bool ok = true;
+                if (!raw.empty()) {
+                    ok = raw.size() <= 7 && std::all_of(raw.begin(), raw.end(), [](char c) { return c >= '0' && c <= '9'; });
+                    if (ok) max_age = std::stol(raw);
+                    ok = ok && max_age >= 1 && max_age <= kMaxAgeLimit;
+                }
+                resp->headers["Content-Type"] = "application/json";
+                if (!ok) {
+                    resp->statusCode = 400;
+                    resp->body = "{\"error\":\"max_age must be a whole number of seconds from 1 to " +
+                                 std::to_string(kMaxAgeLimit) + "\"}";
+                } else {
+                    resp->body = beacons_json(app, max_age);
+                }
             } else if (api && leaf == "search") {
                 resp->headers["Content-Type"] = "application/json";
                 resp->body = search_json(app, url_decode(query_param(req->uri, "q")), 60);

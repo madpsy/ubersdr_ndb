@@ -151,6 +151,7 @@ Plain `iq` (10 kHz) is not supported. It is too narrow to be worth it, and each 
 | WebSocket `/` | pushes `status`, `spectrum`, `decodes`, `heard` (JSON) |
 | `GET /api/status` | streams, receiver, every channel with its navaid match and candidates |
 | `GET /api/spectrum` | averaged spectrum + floor per stream (2048 points) |
+| `GET /api/beacons?max_age=300` | **for polling:** identified beacons heard in the last `max_age` seconds (1–604800, default 300; anything else is a `400`), most recent first, with position, distance, first/last heard, best SNR, and current SNR if live |
 | `GET /api/heard` | heard log |
 | `GET /api/decodes` | recent live copy |
 | `GET /api/navaids?max_km=…` | published NDBs in the covered band (default radius `NDB_RADIUS_KM`) |
