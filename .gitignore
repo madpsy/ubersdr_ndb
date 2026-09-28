@@ -1,0 +1,12 @@
+# Build artefacts
+build/
+IXWebSocket/
+navaids.csv
+
+# Docker build context staging
+*.tmp
+
+# Editor
+.vscode/
+*.swp
+*~

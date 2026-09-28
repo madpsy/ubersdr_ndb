@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NDB Decoder</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <div class="logo">📡</div>
+  <div class="header-text">
+    <h1>NDB Decoder</h1>
+    <p id="subtitle">Non-directional beacons — every carrier in the IQ passband, decoded in parallel</p>
+  </div>
+  <div id="search-wrap" title="Filter by ident, station name, country or frequency">
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+      <circle cx="6.5" cy="6.5" r="5" stroke="currentColor" stroke-width="1.5"/>
+      <line x1="10.5" y1="10.5" x2="14.5" y2="14.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+    <input type="text" id="search" placeholder="Filter beacons…" autocomplete="off" spellcheck="false">
+  </div>
+  <label class="toggle" title="Hide carriers with no decoded ident">
+    <input type="checkbox" id="ident-only"> Identified only
+  </label>
+  <span id="status" class="status-err">Connecting…</span>
+</header>
+
+<section id="stats">
+  <div class="stat"><span class="stat-label">Carriers</span><span class="stat-val" id="st-carriers">–</span></div>
+  <div class="stat"><span class="stat-label">Identified</span><span class="stat-val" id="st-ident">–</span></div>
+  <div class="stat"><span class="stat-label">Furthest</span><span class="stat-val" id="st-far">–</span></div>
+  <div class="stat"><span class="stat-label">Coverage</span><span class="stat-val" id="st-band">–</span></div>
+</section>
+
+<div class="card" id="spec-card">
+  <div class="card-header">Spectrum <span class="hint" id="spec-hint">hover for published beacons at a frequency</span></div>
+  <div id="spectra"></div>
+</div>
+
+<div id="main-row">
+  <div class="card" id="table-card">
+    <div class="card-header">Beacons</div>
+    <div id="table-wrap">
+      <table id="beacons">
+        <thead><tr>
+          <th data-sort="freq">kHz</th>
+          <th data-sort="ident">Ident</th>
+          <th data-sort="name">Station</th>
+          <th data-sort="dist" class="num">Distance</th>
+          <th data-sort="snr" class="num">SNR</th>
+          <th class="num">Tone</th>
+          <th class="num">WPM</th>
+          <th>Copy</th>
+        </tr></thead>
+        <tbody id="rows"><tr><td colspan="8" class="empty">Waiting for the first IQ…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card" id="map-card">
+    <div class="card-header">Map
+      <label class="toggle small" title="Range rings around the receiver">
+        <input type="checkbox" id="show-rings" checked> Rings
+      </label>
+      <label class="toggle small" title="Beacons in the heard log that are not live now">
+        <input type="checkbox" id="show-earlier" checked> Heard earlier
+      </label>
+      <label class="toggle small" title="Published NDBs in the covered band that have never been heard">
+        <input type="checkbox" id="show-unheard" checked> Unheard
+      </label>
+    </div>
+    <div id="map"></div>
+  </div>
+</div>
+
+<div id="log-row">
+  <div class="card" id="live-card">
+    <div class="card-header">Live copy <span class="hint">as the decoders produce it · UTC</span></div>
+    <div id="live"><div class="empty">Nothing decoded yet.</div></div>
+  </div>
+  <div class="card" id="heard-card">
+    <div class="card-header">Heard log <span class="hint" id="heard-hint"></span></div>
+    <div id="heard-wrap">
+      <table id="heard">
+        <thead><tr>
+          <th>Ident</th><th>Station</th><th>kHz</th><th class="num">Distance</th>
+          <th class="num">Best SNR</th><th class="num">First heard</th><th class="num">Last heard</th>
+        </tr></thead>
+        <tbody id="heard-rows"><tr><td colspan="7" class="empty">No beacons identified yet.</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<p class="footnote">Beacon data: <a href="https://ourairports.com/data/" target="_blank" rel="noopener">OurAirports</a> (public domain).
+Morse: <a href="https://github.com/ggerganov/ggmorse" target="_blank" rel="noopener">ggmorse</a>.
+✓ decoded ident matches the published beacon · ≈ matches all but the last letter · <i>italic</i> = unconfirmed nearest candidate.</p>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,137 @@
+// ndb_channel.h — one NDB: tune, demodulate, decode the Morse ident.
+//
+// Signal path, per channel:
+//
+//   wideband IQ (fs) ──► rotator: carrier → DC
+//                    ──► FIR ↓D1 to 16 kHz        (coarse; kills far-off signals)
+//                    ──► FIR ↓4  to  4 kHz        (±1.3 kHz channel)
+//                    ──► |z|  AM envelope, normalised by the carrier level
+//                    ──┬► KeyingDecoder (NDB-specific; the copy shown)  ─┐
+//                      └► ggmorse (general CW decoder; second opinion)   ─┴► ident tally
+//
+// 4 kHz is ggmorse's internal base rate, so it is fed with no resampling. The
+// AM detector turns an A2A NDB (continuous carrier, ident keyed as a 400 or
+// 1020 Hz tone) into exactly what ggmorse expects: a keyed audio tone.
+//
+// An A1A NDB (keyed carrier, no tone) would demodulate to a keyed DC level
+// instead. That is not handled yet — see TODO in ndb_channel.cpp.
+
+#pragma once
+
+#include "dsp.h"
+#include "keying_decoder.h"
+
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
+class GGMorse;
+
+namespace ndb {
+
+constexpr double kAudioRate = 4000.0;  // == GGMorse::kBaseSampleRate
+
+struct ChannelSnapshot {
+    int         id = 0;
+    double      freq_hz = 0.0;        // absolute
+    double      offset_hz = 0.0;      // from IQ centre
+    float       snr_db = 0.0f;        // from the wideband detector
+    float       carrier_db = 0.0f;    // carrier level at the channel output
+    float       pitch_hz = 0.0f;      // ggmorse estimate (the ident tone)
+    float       speed_wpm = 0.0f;     // ggmorse estimate
+    float       cost = 1.0f;          // ggmorse cost of the last decode (lower = better)
+    float       contrast_db = 0.0f;   // tone on/off contrast (KeyingDecoder)
+    bool        keying = false;       // KeyingDecoder sees on/off keying
+    std::string ident;                // most frequent repeated token, or ""
+    int         ident_count = 0;      // how many times it was seen
+    std::string text;                 // recent copy (KeyingDecoder)
+    std::string text_ggm;             // recent copy (ggmorse), for comparison
+    bool        pinned = false;       // requested on the command line; never dropped
+    double      age_s = 0.0;          // since the channel was created
+    double      last_seen_s = 0.0;    // since the detector last saw the carrier
+    double      last_text_s = -1.0;   // since ggmorse last produced text (-1 = never)
+};
+
+class NdbChannel {
+public:
+    NdbChannel(int id, double center_hz, double offset_hz, double fs, bool pinned, double now_s);
+    ~NdbChannel();
+
+    NdbChannel(const NdbChannel &) = delete;
+    NdbChannel &operator=(const NdbChannel &) = delete;
+
+    // now_s is stream time (seconds of IQ consumed), used for all ages below.
+    void process(const cf *x, size_t n, double now_s);
+
+    // Carrier moved (drift, or a better estimate): retune, phase-continuously.
+    void retune(double offset_hz);
+
+    // Pin ggmorse's pitch and/or speed (<= 0 leaves that one on auto).
+    void lock(float pitch_hz, float speed_wpm);
+
+    // Called by the manager on each detection pass that finds this carrier.
+    void seen(float snr_db, double now_s);
+
+    int    id() const { return id_; }
+    double offset_hz() const { return rot_.freq(); }
+    bool   pinned() const { return pinned_; }
+    double last_seen_s() const { return last_seen_; }
+
+    ChannelSnapshot snapshot(double now_s) const;
+
+    // Optional tap on the 4 kHz audio exactly as ggmorse receives it (for
+    // debugging, and a future listen-in feature).
+    std::function<void(const float *, size_t)> audio_tap;
+
+    // Called with each chunk of text as ggmorse produces it (for the live
+    // decode feed). Runs on the IQ thread, under the caller's stream lock.
+    std::function<void(const std::string &)> on_decode;
+
+private:
+    void on_audio(float a);
+    void run_morse();
+    enum class Source { Keying, Ggmorse };
+    void on_text(const std::string &s, double now_s, Source src);
+    void end_token(std::string &token, double now_s);
+
+    int id_;
+    double center_hz_;
+    double fs_;
+    bool pinned_;
+
+    Rotator rot_;
+    Decimator dec1_, dec2_;
+
+    // AM detector state.
+    float dc_ = 0.0f;           // carrier magnitude, slow average
+    float dc_alpha_;            // ~1 s time constant at the audio rate
+    HighPass hp1_, hp2_;        // 4th-order high-pass ahead of ggmorse
+
+    // ggmorse and the audio queued for it.
+    std::unique_ptr<GGMorse> ggm_;
+    std::vector<float> audio_;
+    size_t audio_read_ = 0;
+    size_t tapped_ = 0;
+
+    KeyingDecoder key_;
+
+    // Decoded text and ident tally. Each decoder builds its own tokens; both
+    // feed the one tally.
+    std::string text_, text_ggm_;
+    std::string token_key_, token_ggm_;
+    struct Tok { std::string s; double t; };
+    std::deque<Tok> tokens_;    // recent candidate ident tokens
+
+    float  snr_db_ = 0.0f;
+    float  cost_ = 1.0f;
+    double created_ = 0.0;
+    double last_seen_ = 0.0;
+    double last_text_ = -1.0;
+    double now_ = 0.0;          // stream time of the last process() call
+};
+
+}  // namespace ndb
