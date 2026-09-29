@@ -28,8 +28,10 @@ const state = {
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const flag = (cc) => (cc && cc.length === 2)
-  ? String.fromCodePoint(...[...cc.toUpperCase()].map((c) => 127397 + c.charCodeAt(0))) : '';
+// In a .flag span, so it gets the self-hosted Twemoji font (see style.css):
+// Windows has no flag glyphs and would show bare letter pairs.
+const flag = (cc) => (cc && /^[A-Za-z]{2}$/.test(cc))
+  ? `<span class="flag" title="${esc(cc.toUpperCase())}">${String.fromCodePoint(...[...cc.toUpperCase()].map((c) => 127397 + c.charCodeAt(0)))}</span>` : '';
 const khz = (hz) => (hz / 1e3).toFixed(3);
 const compass = (deg) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(deg / 45) % 8];
 const snrColour = (snr) => snr >= 30 ? 'var(--ok)' : snr >= 18 ? 'var(--accent)' : snr >= 12 ? 'var(--warn)' : 'var(--err)';
@@ -931,6 +933,7 @@ async function refreshNavaids() {
   try {
     const r = await fetch('api/navaids');   // radius: NDB_MAP_RADIUS_KM, server side
     state.navaids = (await r.json()).navaids || [];
+    renderHeader();   // "Identified" is out of these
     renderMap();
   } catch (e) { state.navaidsKey = ''; }
 }

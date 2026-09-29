@@ -1,3 +1,30 @@
+/* Flag emoji, self-hosted, as the other UberSDR addons do. Chrome on
+   Windows has no flag glyphs in Segoe UI Emoji and renders bare "GB" letter
+   pairs instead, so the font is needed rather than nice to have. Twemoji
+   subset to the Regional Indicator block only, from ubersdr_dxcluster.
+
+   unicode-range confines it to flag codepoints, so it never affects other
+   text. The ascent/descent overrides work around a Safari bug where the
+   emoji font's large metrics inflate line-height on any element naming
+   this family. */
+@font-face {
+  font-family: 'Twemoji Flags';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('twemoji-flags.woff2') format('woff2');
+  unicode-range: U+1F1E6-1F1FF;
+  ascent-override: 100%;
+  descent-override: 20%;
+  line-gap-override: 0%;
+}
+.flag {
+  font-family: 'Twemoji Flags', 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', sans-serif;
+  font-size: 1.05em;
+  line-height: 1;
+  vertical-align: -1px;
+}
+
 /* Palette and header/status styling follow ubersdr_loran so the addons read as one family. */
 :root {
   --bg:        #0d0d0f;

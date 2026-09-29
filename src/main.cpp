@@ -1273,6 +1273,7 @@ std::string content_type(const std::string &name)
     if (ends(".css")) return "text/css; charset=utf-8";
     if (ends(".svg")) return "image/svg+xml";
     if (ends(".png")) return "image/png";
+    if (ends(".woff2")) return "font/woff2";
     if (ends(".json")) return "application/json";
     return "application/octet-stream";
 }
