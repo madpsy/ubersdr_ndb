@@ -296,6 +296,14 @@ void NdbChannel::end_token(std::string &token, double now_s)
     }
 }
 
+int NdbChannel::copies(const std::string &token, double now_s) const
+{
+    int n = 0;
+    for (const auto &t : tokens_)
+        if (now_s - t.t <= kTokenWindow && t.s == token) ++n;
+    return n;
+}
+
 ChannelSnapshot NdbChannel::snapshot(double now_s) const
 {
     ChannelSnapshot s;
@@ -353,6 +361,7 @@ ChannelSnapshot NdbChannel::snapshot(double now_s) const
             }
         }
     }
+    if (!s.ident.empty()) s.ident_age_s = now_s - tally[s.ident].second;
     return s;
 }
 

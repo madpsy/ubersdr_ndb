@@ -7,7 +7,11 @@
 //   - a carrier seen on `confirm_passes` consecutive passes gets a channel;
 //   - a channel's carrier estimate is followed if it drifts;
 //   - a channel whose carrier has not been seen for `drop_after_s` is removed,
-//     unless it was pinned from the command line.
+//     unless it was pinned from the command line;
+//   - a channel whose ident is accepted gives its slot up. A beacon sends
+//     nothing but its ident, so once that is known there is nothing more to
+//     decode: the beacon is tracked by its carrier alone, and revisited with a
+//     short decode every `revisit_s` to confirm it is still what is heard.
 //
 // Not thread-safe on its own: the caller serialises process() against
 // snapshot()/spectrum() (main.cpp holds one mutex around both).
@@ -27,12 +31,26 @@ namespace ndb {
 
 struct DecoderConfig {
     DetectorConfig detector;
-    int    max_channels   = 48;     // a 192 kHz window over the UK sees ~40 carriers
+    int    max_channels   = 8;      // identified beacons don't hold one (see revisit_s)
     int    confirm_passes = 2;
     double match_hz       = 20.0;   // detection within this of a channel is that channel
     double retune_hz      = 1.0;    // follow the carrier if it moves more than this
     double drop_after_s   = 120.0;
     double drop_identified_after_s = 1800.0;  // an identified beacon survives fades this long
+    // Identified beacons: tracked by carrier, revisited to re-copy the ident.
+    // A due revisit takes the next free slot ahead of waiting carriers, and
+    // once revisit_grace_s overdue takes one from an unidentified channel.
+    // A visit ends on visit_copies fresh copies of the ident, or gives up
+    // after visit_timeout_s (a miss; tried again after visit_retry_s). A
+    // beacon missed lost_misses visits running, or not copied for
+    // lost_after_s, is forgotten.
+    double revisit_s       = 900.0;
+    double revisit_grace_s = 300.0;
+    double visit_timeout_s = 180.0;
+    double visit_retry_s   = 300.0;
+    int    visit_copies    = 2;     // also main's --ident-copies for a first identification
+    int    lost_misses     = 3;
+    double lost_after_s    = 7200.0;
     // With every slot taken, a channel that has shown no keying for this long
     // gives its slot to the next waiting carrier, which then waits out a
     // cooldown before it can take one back. So all carriers get a turn, and
@@ -77,6 +95,7 @@ public:
     double stream_time() const { return now_; }
     const std::vector<Carrier> &carriers() const { return det_.carriers(); }
     size_t waiting() const { return pending_.size(); }   // detected carriers without a slot
+    size_t tracking() const { return tracked_.size(); }  // identified beacons watched by carrier
 
     // Absolute frequencies of published beacons worth a lower detection
     // threshold (see DetectorConfig::assist_snr_db).
@@ -90,6 +109,15 @@ public:
     // Live decode feed: channel id, its frequency, and the new text.
     std::function<void(int, double, const std::string &)> on_decode;
 
+    // Whether an ident is good enough to give the channel's slot up: called
+    // with the absolute frequency, the ident and its copy count. Unset, any
+    // ident with 3 copies is. Called under the caller's stream lock.
+    std::function<bool(double, const std::string &, int)> accept_ident;
+
+    // Seconds since its last copy within which a tracked beacon's ident
+    // still counts as current (see ChannelSnapshot::ident_fresh).
+    double fresh_s() const { return cfg_.revisit_s + cfg_.revisit_grace_s + cfg_.visit_timeout_s; }
+
     // Human-readable reason this sample rate cannot be used, or "" if it can.
     static std::string check_sample_rate(double fs);
 
@@ -98,7 +126,32 @@ private:
     void assign_ggmorse();
     std::map<int, double> ggm_since_;     // channel id -> when ggmorse was attached
     std::map<int, double> ggm_resting_;   // channel id -> when it was released unsuccessfully
-    NdbChannel *add_channel(double offset_hz, bool pinned);
+    NdbChannel *add_channel(double offset_hz, bool pinned, int id = 0);
+    void remove_channel(NdbChannel *ch);
+    bool accepted(const ChannelSnapshot &s) const;
+    void service_visits();
+    void release_identified();
+    void schedule_visits();
+
+    // An identified beacon without a slot, watched through the detector.
+    struct Tracked {
+        int         id;             // the channel id it had, kept for its visits
+        double      offset_hz;
+        std::string ident;
+        int         copies;         // best tally so far
+        double      verified;       // stream time of the last copy
+        double      seen;           // the detector last saw its carrier
+        float       snr_db;
+        int         misses = 0;     // visits running that copied nothing
+        double      next_visit;
+        bool        visiting = false;   // channel `id` is open for it now
+        double      visit_start = 0.0;
+        double      created;        // its first channel was opened
+        ChannelSnapshot last;       // as it was when last decoded, for display
+    };
+    std::vector<Tracked> tracked_;
+    Tracked *tracked_for(int id);
+    NdbChannel *channel(int id);
 
     double center_hz_;
     double fs_;

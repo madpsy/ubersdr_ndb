@@ -29,17 +29,47 @@ NdbDecoder::NdbDecoder(double center_hz, double sample_rate, DecoderConfig cfg)
     }
 }
 
-NdbChannel *NdbDecoder::add_channel(double offset_hz, bool pinned)
+NdbChannel *NdbDecoder::add_channel(double offset_hz, bool pinned, int id)
 {
-    channels_.push_back(std::make_unique<NdbChannel>(next_id_++, center_hz_, offset_hz, fs_, pinned, now_,
+    const bool visit = id != 0;
+    channels_.push_back(std::make_unique<NdbChannel>(visit ? id : next_id_++, center_hz_, offset_hz, fs_, pinned, now_,
                                                      cfg_.ggmorse == DecoderConfig::Ggmorse::All));
     NdbChannel *ch = channels_.back().get();
     ch->on_decode = [this, ch](const std::string &s) {
         if (on_decode) on_decode(ch->id(), center_hz_ + ch->offset_hz(), s);
     };
-    fprintf(stderr, "ndb: + ch%d %.1f Hz%s\n", channels_.back()->id(), center_hz_ + offset_hz,
-            pinned ? " (pinned)" : "");
-    return channels_.back().get();
+    // Revisits are routine; only their outcome is logged.
+    if (!visit)
+        fprintf(stderr, "ndb: + ch%d %.1f Hz%s\n", ch->id(), center_hz_ + offset_hz, pinned ? " (pinned)" : "");
+    return ch;
+}
+
+void NdbDecoder::remove_channel(NdbChannel *ch)
+{
+    ggm_since_.erase(ch->id());
+    ggm_resting_.erase(ch->id());
+    channels_.erase(std::find_if(channels_.begin(), channels_.end(),
+                                 [&](const std::unique_ptr<NdbChannel> &c) { return c.get() == ch; }));
+}
+
+NdbChannel *NdbDecoder::channel(int id)
+{
+    for (auto &ch : channels_)
+        if (ch->id() == id) return ch.get();
+    return nullptr;
+}
+
+NdbDecoder::Tracked *NdbDecoder::tracked_for(int id)
+{
+    for (auto &t : tracked_)
+        if (t.id == id) return &t;
+    return nullptr;
+}
+
+bool NdbDecoder::accepted(const ChannelSnapshot &s) const
+{
+    if (s.ident.empty()) return false;
+    return accept_ident ? accept_ident(center_hz_ + s.offset_hz, s.ident, s.ident_count) : s.ident_count >= 3;
 }
 
 void NdbDecoder::set_assist(const std::vector<double> &abs_hz)
@@ -66,6 +96,9 @@ void NdbDecoder::set_known(const std::vector<double> &abs_hz)
             ++it;
         }
     }
+    tracked_.erase(std::remove_if(tracked_.begin(), tracked_.end(),
+                                  [&](const Tracked &t) { return !near_known(t.offset_hz); }),
+                   tracked_.end());
     pending_.erase(std::remove_if(pending_.begin(), pending_.end(),
                                   [&](const Pending &p) { return !near_known(p.offset_hz); }),
                    pending_.end());
@@ -98,6 +131,19 @@ void NdbDecoder::on_detection()
     for (auto &p : pending_) p.hit_this_pass = false;
 
     for (const auto &c : found) {
+        // A tracked beacon's carrier: follow it. It needs no channel.
+        Tracked *tr = nullptr;
+        double tbest = cfg_.match_hz;
+        for (auto &t : tracked_) {
+            double d = std::fabs(t.offset_hz - c.offset_hz);
+            if (d < tbest) { tbest = d; tr = &t; }
+        }
+        if (tr) {
+            tr->seen = now_;
+            tr->snr_db = c.snr_db;
+            tr->offset_hz = c.offset_hz;
+        }
+
         // Existing channel?
         NdbChannel *match = nullptr;
         double best = cfg_.match_hz;
@@ -112,7 +158,7 @@ void NdbDecoder::on_detection()
                 match->retune(c.offset_hz);
             continue;
         }
-        if (!cfg_.auto_detect) continue;
+        if (tr || !cfg_.auto_detect) continue;
         // Only carriers where a known beacon is published, unless asked for all.
         if (cfg_.known_only && !known_.empty() && !near_known(c.offset_hz)) continue;
 
@@ -140,6 +186,13 @@ void NdbDecoder::on_detection()
     const auto cutoff = now_ - cfg_.cooldown_s;
     recycled_.erase(std::remove_if(recycled_.begin(), recycled_.end(), [&](const Recycled &r) { return r.at < cutoff; }),
                     recycled_.end());
+
+    // Identified beacons first: finish their visits, free the slots of any
+    // newly identified, and open the revisits that are due.
+    service_visits();
+    release_identified();
+    schedule_visits();
+
     for (auto it = pending_.begin(); it != pending_.end();) {
         if (it->hits < cfg_.confirm_passes) { ++it; continue; }
         if (int(channels_.size()) >= cfg_.max_channels) {
@@ -148,10 +201,7 @@ void NdbDecoder::on_detection()
             if (!victim) break;
             fprintf(stderr, "ndb: ~ ch%d %.1f Hz recycled (no keying)\n", victim->id(), center_hz_ + victim->offset_hz());
             recycled_.push_back({victim->offset_hz(), now_});
-            ggm_since_.erase(victim->id());
-            ggm_resting_.erase(victim->id());
-            channels_.erase(std::find_if(channels_.begin(), channels_.end(),
-                                         [&](const std::unique_ptr<NdbChannel> &c) { return c.get() == victim; }));
+            remove_channel(victim);
         }
         NdbChannel *ch = add_channel(it->offset_hz, false);
         ch->seen(it->snr_db, now_);
@@ -177,6 +227,119 @@ void NdbDecoder::on_detection()
             continue;
         }
         ++it;
+    }
+}
+
+// End revisits that have copied the ident, found a different one, or run out
+// of time, and forget tracked beacons that have gone.
+void NdbDecoder::service_visits()
+{
+    for (auto it = tracked_.begin(); it != tracked_.end();) {
+        Tracked &t = *it;
+        const double f = center_hz_ + t.offset_hz;
+        if (!t.visiting) {
+            const bool gone = now_ - t.seen > cfg_.drop_identified_after_s;
+            if (t.misses >= cfg_.lost_misses || now_ - t.verified > cfg_.lost_after_s || gone) {
+                fprintf(stderr, "ndb: - ch%d %.1f Hz %s lost (%s)\n", t.id, f, t.ident.c_str(),
+                        gone ? "carrier gone" : t.misses >= cfg_.lost_misses ? "revisits copied nothing"
+                                                                              : "not copied for too long");
+                it = tracked_.erase(it);
+                continue;
+            }
+            ++it;
+            continue;
+        }
+        NdbChannel *ch = channel(t.id);
+        if (!ch) {
+            // The carrier faded mid-visit (or the known list changed): not a miss.
+            t.visiting = false;
+            t.next_visit = now_ + cfg_.visit_retry_s;
+            ++it;
+            continue;
+        }
+        const auto s = ch->snapshot(now_);
+        const int n = ch->copies(t.ident, now_);
+        if (n >= cfg_.visit_copies) {
+            fprintf(stderr, "ndb: = ch%d %.1f Hz %s reconfirmed in %.0f s\n", t.id, f, t.ident.c_str(),
+                    now_ - t.visit_start);
+            t.verified = now_;
+            t.misses = 0;
+            t.copies = std::max(t.copies, n);
+            t.visiting = false;
+            t.next_visit = now_ + cfg_.revisit_s;
+            t.last = s;
+            remove_channel(ch);
+        } else if (!s.ident.empty() && s.ident != t.ident && accepted(s)) {
+            // Another beacon has the frequency now. The channel carries on as
+            // an ordinary one, and release_identified() tracks it afresh.
+            fprintf(stderr, "ndb: ! ch%d %.1f Hz is now %s, not %s\n", t.id, f, s.ident.c_str(), t.ident.c_str());
+            it = tracked_.erase(it);
+            continue;
+        } else if (now_ - t.visit_start > cfg_.visit_timeout_s) {
+            ++t.misses;
+            fprintf(stderr, "ndb: ? ch%d %.1f Hz %s not copied on revisit (%d/%d)\n", t.id, f, t.ident.c_str(),
+                    t.misses, cfg_.lost_misses);
+            t.visiting = false;
+            t.next_visit = now_ + cfg_.visit_retry_s;
+            remove_channel(ch);
+        }
+        ++it;
+    }
+}
+
+// An identified beacon has nothing more to decode: give its slot up and track
+// its carrier instead. Pinned channels keep theirs, as asked.
+void NdbDecoder::release_identified()
+{
+    for (size_t i = 0; i < channels_.size();) {
+        NdbChannel *ch = channels_[i].get();
+        if (ch->pinned() || tracked_for(ch->id())) { ++i; continue; }
+        const auto s = ch->snapshot(now_);
+        if (!accepted(s)) { ++i; continue; }
+        Tracked t;
+        t.id = ch->id();
+        t.offset_hz = ch->offset_hz();
+        t.ident = s.ident;
+        t.copies = s.ident_count;
+        t.verified = now_ - std::max(0.0, s.ident_age_s);
+        t.seen = ch->last_seen_s();
+        t.snr_db = s.snr_db;
+        t.next_visit = t.verified + cfg_.revisit_s;
+        t.created = ch->created_s();
+        t.last = s;
+        fprintf(stderr, "ndb: > ch%d %.1f Hz %s identified, slot released\n", t.id, center_hz_ + t.offset_hz,
+                t.ident.c_str());
+        tracked_.push_back(std::move(t));
+        remove_channel(ch);
+    }
+}
+
+// Open the revisits that are due, most overdue first. A free slot goes to a
+// revisit before any waiting carrier; with none free, one overdue by
+// revisit_grace_s takes the slot of the unidentified channel that has held
+// one longest. Only a carrier the detector sees now is worth a visit.
+void NdbDecoder::schedule_visits()
+{
+    std::vector<Tracked *> due;
+    for (auto &t : tracked_)
+        if (!t.visiting && now_ >= t.next_visit && now_ - t.seen < 60.0) due.push_back(&t);
+    std::sort(due.begin(), due.end(), [](const Tracked *a, const Tracked *b) { return a->next_visit < b->next_visit; });
+    for (Tracked *t : due) {
+        if (int(channels_.size()) >= cfg_.max_channels) {
+            if (now_ - t->next_visit < cfg_.revisit_grace_s) break;   // the rest are less overdue
+            NdbChannel *victim = nullptr;
+            for (auto &ch : channels_)
+                if (!ch->pinned() && !tracked_for(ch->id()) && (!victim || ch->created_s() < victim->created_s()))
+                    victim = ch.get();
+            if (!victim) break;
+            fprintf(stderr, "ndb: ~ ch%d %.1f Hz recycled (revisit of %s overdue)\n", victim->id(),
+                    center_hz_ + victim->offset_hz(), t->ident.c_str());
+            recycled_.push_back({victim->offset_hz(), now_});
+            remove_channel(victim);
+        }
+        add_channel(t->offset_hz, false, t->id)->seen(t->snr_db, now_);
+        t->visiting = true;
+        t->visit_start = now_;
     }
 }
 
@@ -236,7 +399,7 @@ NdbChannel *NdbDecoder::recyclable()
     NdbChannel *best = nullptr;
     double best_idle = 0.0;
     for (auto &ch : channels_) {
-        if (ch->pinned() || now_ - ch->created_s() < cfg_.trial_s) continue;
+        if (ch->pinned() || tracked_for(ch->id()) || now_ - ch->created_s() < cfg_.trial_s) continue;
         const bool ever = ch->last_active_s() >= 0;
         const double idle = now_ - (ever ? ch->last_active_s() : ch->created_s());
         if (idle < (ever ? cfg_.active_hold_s : cfg_.trial_s) || !ch->snapshot(now_).ident.empty()) continue;
@@ -248,8 +411,39 @@ NdbChannel *NdbDecoder::recyclable()
 std::vector<ChannelSnapshot> NdbDecoder::snapshot() const
 {
     std::vector<ChannelSnapshot> out;
-    out.reserve(channels_.size());
-    for (const auto &ch : channels_) out.push_back(ch->snapshot(now_));
+    out.reserve(channels_.size() + tracked_.size());
+    auto fresh = [&](ChannelSnapshot &s, const Tracked &t) {
+        s.ident = t.ident;
+        s.ident_count = std::max(s.ident_count, t.copies);
+        s.ident_age_s = now_ - t.verified;
+        s.ident_fresh = s.ident_age_s < fresh_s();
+        s.age_s = now_ - t.created;
+    };
+    for (const auto &ch : channels_) {
+        out.push_back(ch->snapshot(now_));
+        auto &s = out.back();
+        for (const auto &t : tracked_) {
+            if (t.id != ch->id()) continue;
+            // A revisit: show the remembered ident while it re-copies it.
+            s.visit = true;
+            if (s.ident.empty() || s.ident == t.ident) fresh(s, t);
+        }
+    }
+    for (const auto &t : tracked_) {
+        if (t.visiting) continue;
+        ChannelSnapshot s = t.last;
+        s.id = t.id;
+        s.offset_hz = t.offset_hz;
+        s.freq_hz = center_hz_ + t.offset_hz;
+        s.snr_db = t.snr_db;
+        s.ggmorse = false;
+        s.tracking = true;
+        s.last_seen_s = now_ - t.seen;
+        s.last_text_s = now_ - t.verified;
+        s.ident_count = 0;
+        fresh(s, t);
+        out.push_back(std::move(s));
+    }
     std::sort(out.begin(), out.end(),
               [](const ChannelSnapshot &a, const ChannelSnapshot &b) { return a.freq_hz < b.freq_hz; });
     return out;

@@ -148,6 +148,7 @@ tbody tr.stale { opacity: 0.55; }
 .badge.near { color: var(--warn); background: #f59e0b1f; }
 .badge.n    { color: var(--muted); background: #ffffff0d; }
 .badge.g    { color: #c4b5fd; background: #7c3aed26; }
+.badge.t    { color: #7dd3fc; background: #0ea5e91f; }
 .station { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
 .station .cc { color: var(--muted); font-size: 11px; margin-left: 4px; }
 .station.guess { color: var(--muted); font-style: italic; }

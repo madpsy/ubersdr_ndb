@@ -20,7 +20,8 @@ CarrierDetector  ─ 32k-point FFT (2.9 Hz bins), averaged
         │          drops tone sidebands and weak peaks beside strong carriers
         ▼
 NdbDecoder  ─ carrier seen on 2 passes → channel; drifting carrier → retune;
-        │     gone for 2 min → dropped (30 min if it was identified)
+        │     gone for 2 min → dropped; identified → channel freed, carrier
+        │     tracked, ident re-copied on a revisit every 15 min
         ▼
 NdbChannel (one per beacon)
    rotate carrier to DC → FIR ↓ to 16 kHz → FIR ↓ to 4 kHz (±1.3 kHz)
@@ -58,6 +59,14 @@ Decoding is blind: neither decoder is told what to expect. The navaid database i
 ggmorse costs ~10× the keying decoder, and on strong beacons adds nothing, so it isn't run everywhere. A pool of instances (`NDB_GGMORSE_SLOTS`, default 6 per stream) goes to the channels where a second opinion helps: not yet identified, but showing some tone keying (contrast ≥ 11 dB, including those just under the keying decoder's 15 dB gate). A channel gives its instance back once identified, after 5 minutes without success (then rests 15 minutes so others get a turn), or if the keying evidence fades. Each instance is also handed what the keying decoder has learned: its audio is band-passed ±75 Hz around the known tone, and its pitch and (when known) speed are fixed, so it only has to decide the threshold. The UI marks those channels `2nd`.
 
 On the test capture, the pool identifies the same beacons as running ggmorse on every channel, including CBL, which the keying decoder alone misses. It does so for 8.5× less CPU.
+
+### Revisits
+
+A beacon sends nothing but its ident, so once that is copied there is nothing more to decode. An identified beacon gives its channel up straight away, and its carrier is tracked by the detector, which scans the whole stream anyway, at no cost. Every `NDB_REVISIT_MIN` (15) minutes it gets a revisit: a channel reopens on it until the ident is copied `NDB_IDENT_COPIES` (2) more times, usually within a minute or two. A due revisit takes the next free slot ahead of waiting carriers. Once 5 minutes overdue, it takes the slot of the unidentified channel that has held one longest.
+
+A revisit that copies nothing in `NDB_VISIT_TIMEOUT_S` (180 s) is a miss, and is tried again 5 minutes later. After 3 misses running, 2 hours without a copy, or 30 minutes without the carrier, the beacon is dropped. If a revisit copies a different ident, the new beacon replaces the old one.
+
+Between revisits, a beacon counts as heard while its carrier is there and its last copy is less than 23 minutes old (revisit + grace + timeout). The table shows it as tracked, with its live SNR.
 
 On the test capture, 368.0 **UW** (a 56 dB beacon with 1.5 s of keying then 6 s of silence) never copied in ggmorse, but copies as `UW UW UW …` in KeyingDecoder. EDN, PIK, ATF and DND copy complete every time, where ggmorse often dropped the last letter.
 
@@ -111,7 +120,10 @@ Edit `~/ubersdr/ndb/docker-compose.yml`, then `./restart.sh`.
 | `NDB_PINNED` | | Hz, comma-separated: always decode these, even if not detected |
 | `NDB_SNR` | `10` | Carrier detection threshold, dB above the noise floor |
 | `NDB_ASSIST_KM` | `1500` | Published NDBs this close get a 7 dB threshold (0 = off) |
-| `NDB_MAX_CHANNELS` | `48` | Most beacons decoded at once, per stream. When all are taken, waiting carriers are admitted strongest first, and a channel gives up its slot if it never showed keying in a 3-minute trial, or last keyed over 30 minutes ago. Identified and pinned channels keep theirs. So every carrier gets a turn, and spurs can't crowd out beacons. |
+| `NDB_MAX_CHANNELS` | `8` | Most carriers decoded at once, per stream. Identified beacons don't keep one (see [Revisits](#revisits)), so slots go to unidentified carriers and revisits. When all are taken, waiting carriers are admitted strongest first, and a channel gives up its slot if it never showed keying in a 3-minute trial, or last keyed over 30 minutes ago. Pinned channels keep theirs. So every carrier gets a turn, and spurs can't crowd out beacons. |
+| `NDB_REVISIT_MIN` | `15` | Minutes between revisits of an identified beacon |
+| `NDB_VISIT_TIMEOUT_S` | `180` | A revisit that copies nothing in this long is a miss |
+| `NDB_IDENT_COPIES` | `2` | Copies of a published beacon's ident that identify it, and that reconfirm it on a revisit. Counted over the last hour, not necessarily in a row. A first identification always needs at least 2; an ident matching no published beacon, or only all but its last letter, needs 5. |
 | `NDB_RADIUS_KM` | `2000` | Radius around the receiver. With `NDB_SHOW_UNLISTED=0`, only carriers near a beacon published inside it get a decoder. Decodes are only matched to beacons inside it, since a shared ident far away is far more likely a misread. The map shows unheard beacons out to it. `0` = no limit. (In Europe, published NDBs are dense enough that most whole-kHz frequencies have one within 2000 km, so a smaller radius filters candidates harder.) |
 | `NDB_SHOW_UNLISTED` | `0` | `0` means the known list only. A carrier gets a decoder only if a beacon within `NDB_RADIUS_KM` is published within ±300 Hz of it, and only idents matching one are shown. `1` decodes every carrier (spurs included, at a CPU cost) and also shows idents matching nothing published ("not in database"). Pinned frequencies are always decoded. |
 | `NDB_GGMORSE` | `auto` | ggmorse second decoder: `auto` (a pool for unidentified channels showing keying), `all` (every channel, ~10× the CPU), `off` |
@@ -151,7 +163,7 @@ Plain `iq` (10 kHz) is not supported. It is too narrow to be worth it, and each 
 | WebSocket `/` | pushes `status`, `spectrum`, `decodes`, `heard` (JSON) |
 | `GET /api/status` | streams, receiver, every channel with its navaid match and candidates |
 | `GET /api/spectrum` | averaged spectrum + floor per stream (2048 points) |
-| `GET /api/beacons?max_age=300` | **for polling:** identified beacons heard in the last `max_age` seconds (1–604800, default 300; anything else is a `400`), most recent first, with position, distance, first/last heard, best SNR, and current SNR if live |
+| `GET /api/beacons?max_age=300` | **for polling:** identified beacons heard in the last `max_age` seconds (1–604800, default 300; anything else is a `400`), most recent first, with position, distance, first/last heard, `last_identified` (the last copy of the ident; `last_heard` also counts its carrier between revisits), best SNR, and current SNR if live |
 | `GET /api/heard` | heard log |
 | `GET /api/decodes` | recent live copy |
 | `GET /api/navaids?max_km=…` | published NDBs in the covered band (default radius `NDB_RADIUS_KM`) |
@@ -196,7 +208,7 @@ cmake --build build --target chan_audio
 
 ## Status and next steps
 
-A working base. Tested against a live receiver in Scotland: it identified EDN, UW, PIK, ATF, DND, CBL and CFN (333 km), placed them correctly, and put nothing false in the heard log. With the default `iq192` stream and 48 channels it uses ~16% of one core and ~45 MB. About two thirds of that is the per-channel mixer and decimation filters; a shared FFT channelizer would cut it further if needed.
+A working base. Tested against a live receiver in Scotland: it identified EDN, UW, PIK, ATF, DND, CBL and CFN (333 km), placed them correctly, and put nothing false in the heard log. With the default `iq192` stream and 48 channels (before revisits, when every identified beacon kept a channel) it used ~16% of one core and ~45 MB. About two thirds of that is the per-channel mixer and decimation filters; a shared FFT channelizer would cut it further if needed.
 
 Known gaps, roughly in order of payoff:
 

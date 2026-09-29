@@ -55,6 +55,12 @@ struct ChannelSnapshot {
     double      age_s = 0.0;          // since the channel was created
     double      last_seen_s = 0.0;    // since the detector last saw the carrier
     double      last_text_s = -1.0;   // since ggmorse last produced text (-1 = never)
+    // Identified beacons give their channel up and are tracked by carrier
+    // (see NdbDecoder); these say how current the ident shown is.
+    bool        tracking = false;     // no channel now: carrier watched, ident remembered
+    bool        visit = false;        // a channel reopened to re-copy a remembered ident
+    double      ident_age_s = -1.0;   // since the ident was last copied (-1 = no ident)
+    bool        ident_fresh = true;   // copied recently enough to count as heard now
 };
 
 class NdbChannel {
@@ -96,6 +102,9 @@ public:
     double last_seen_s() const { return last_seen_; }
 
     ChannelSnapshot snapshot(double now_s) const;
+
+    // Copies of this exact token in the tally.
+    int copies(const std::string &token, double now_s) const;
 
     // Optional tap on the 4 kHz audio exactly as ggmorse receives it (for
     // debugging, and a future listen-in feature).

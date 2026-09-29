@@ -22,9 +22,21 @@ services:
       # NDB_PINNED: ""         # Hz, comma-separated: always decode these, even unseen
       # NDB_SNR: "10"          # carrier detection threshold, dB above the noise floor
       # NDB_ASSIST_KM: "1500"  # published beacons this close get a lower threshold (7 dB)
-      # Most beacons decoded at once, per stream. Each costs CPU; the default
-      # stream sees ~40 carriers in the UK (NDBs plus local spurs).
-      NDB_MAX_CHANNELS: "48"
+      # Most carriers decoded at once, per stream. Each costs CPU. Identified
+      # beacons don't hold one: they are tracked by carrier and revisited, so
+      # these slots only go to unidentified carriers and short revisits.
+      NDB_MAX_CHANNELS: "8"
+      # Minutes between revisits of an identified beacon, to re-copy its ident
+      # and confirm it is still heard.
+      NDB_REVISIT_MIN: "15"
+      # A revisit that copies nothing in this many seconds counts as a miss
+      # (retried 5 min later; 3 misses running and the beacon is dropped).
+      NDB_VISIT_TIMEOUT_S: "180"
+      # Copies of a published beacon's ident that identify it, and reconfirm
+      # it on a revisit. Counted within the last hour, not necessarily in a
+      # row. A first identification always needs at least 2; an ident that
+      # matches no published beacon (or only all but its last letter) needs 5.
+      NDB_IDENT_COPIES: "2"
       # Radius around the receiver, in km. A decode is only matched to a
       # published beacon inside it (a shared ident on the far side of the
       # world is far more likely a misread), and the map shows unheard

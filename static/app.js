@@ -86,8 +86,18 @@ function renderHeader() {
 
   const chans = s.channels;
   const idd = chans.filter((c) => c.navaid || c.ident);
-  $('st-carriers').textContent = chans.length;
-  $('st-ident').innerHTML = `${idd.length}<small> / ${chans.length}</small>`;
+  // Every carrier the detector has: decoding now, tracked (identified, no
+  // channel), or waiting for a slot. Not just the channels open.
+  const waiting = s.streams.reduce((n, x) => n + (x.waiting || 0), 0);
+  const carriers = chans.length + waiting;
+  const decoding = chans.filter((c) => !c.tracking).length;
+  $('st-carriers').innerHTML = `${carriers} <small title="decoding now · waiting for a slot">${decoding} dec · ${waiting} wait</small>`;
+  // Published beacons heard now, out of all published within the radius and
+  // inside the streams' passbands (api/navaids).
+  const heardNow = new Set(chans.filter((c) => c.navaid && c.ident_fresh !== false).map((c) => `${c.navaid.ident}@${c.navaid.freq_hz}`));
+  $('st-ident').innerHTML = state.navaids.length
+    ? `${heardNow.size}<small title="published beacons within the radius and in band"> / ${state.navaids.length}</small>`
+    : `${idd.length}`;
   let far = null;
   for (const c of chans) if (c.navaid?.dist_km != null && (!far || c.navaid.dist_km > far.navaid.dist_km)) far = c;
   $('st-far').innerHTML = far ? `${far.navaid.dist_km} km <small>${esc(far.navaid.ident)}</small>` : '–';
@@ -119,6 +129,11 @@ function renderTable() {
     else if (id.kind === 'decoded') identCell = `${esc(id.label)}<span class="badge n" title="Not in the beacon database on this frequency">×${c.ident_count}</span>`;
     else identCell = '<span class="none">…</span>';
     if (c.ggmorse) identCell += '<span class="badge g" title="ggmorse is assisting: a second decoder, given to a few unidentified channels that show keying">2nd</span>';
+    // Identified beacons give their channel up: tracked by carrier between
+    // revisits, which reopen one to re-copy the ident.
+    const copied = c.ident_age_s >= 0 ? `ident last copied ${mins(c.ident_age_s)} ago` : '';
+    if (c.visit) identCell += `<span class="badge t" title="Revisiting: decoding again to re-copy the ident (${copied})">re</span>`;
+    else if (c.tracking) identCell += `<span class="badge t" title="Identified: carrier tracked, not decoding (${copied}); revisited periodically">trk</span>`;
 
     let station = '', dist = '';
     if (id.nav) {
@@ -137,7 +152,7 @@ function renderTable() {
     const pct = Math.max(4, Math.min(100, c.snr_db / 50 * 100));
     const txt = c.text.length > 90 ? c.text.slice(-90) : c.text;
     const hl = c.ident ? esc(txt).split(esc(c.ident)).join(`<b>${esc(c.ident)}</b>`) : esc(txt);
-    const stale = c.last_seen_s > 30;
+    const stale = c.last_seen_s > 30 || !c.ident_fresh;
     // A carrier with no tone keying after a minute is most likely a spur
     // (e.g. a switching-supply comb on whole kHz), or an NDB too weak to read.
     const unkeyed = !c.ident && !c.keying && c.age_s > 60 && c.contrast_db < 15;
@@ -478,6 +493,7 @@ function tipBeacon(n, c, kind) {
       ${row('SNR', `${c.snr_db.toFixed(0)} dB`)}
       ${row('Tone / speed', c.keying ? `${c.pitch_hz} Hz · ${c.speed_wpm} wpm` : '<span class="m">no keying seen</span>')}
       ${row('Copies', c.ident ? `${esc(c.ident)} ×${c.ident_count}` : '')}
+      ${row('Last copied', c.ident && c.ident_age_s >= 0 ? `${mins(c.ident_age_s)} ago${c.visit ? ' <span class="m">(revisiting now)</span>' : c.tracking ? ' <span class="m">(tracked by carrier)</span>' : ''}` : '')}
       ${row('Power', power(n.power))}
       ${row('Also here', others)}
     </table>
@@ -732,6 +748,11 @@ $('live').addEventListener('click', (e) => {
 });
 
 // ── Heard log ───────────────────────────────────────────────────────────────
+
+// A duration in seconds, briefly: "40 s", "12 min", "2 h".
+function mins(s) {
+  return s < 60 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${Math.round(s / 3600)} h`;
+}
 
 function ago(s) {
   const d = Math.max(0, (state.heardNow || Date.now() / 1000) - s);

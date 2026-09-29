@@ -8,7 +8,12 @@
 #                      mode is iq48 | iq96 | iq192 | iq384 (±24 / ±48 / ±96 / ±192 kHz)
 #   NDB_PINNED         Frequencies in Hz always decoded, comma-separated (optional)
 #   NDB_SNR            Carrier detection threshold in dB above the floor (default: 10)
-#   NDB_MAX_CHANNELS   Cap on simultaneous beacons per stream (default: 48)
+#   NDB_MAX_CHANNELS   Carriers decoded at once per stream (default: 8); identified
+#                      beacons don't hold one, they are tracked and revisited
+#   NDB_REVISIT_MIN    Minutes between revisits of an identified beacon (default: 15)
+#   NDB_VISIT_TIMEOUT_S  A revisit copying nothing in this long is a miss (default: 180)
+#   NDB_IDENT_COPIES   Copies of a published ident that identify / reconfirm it,
+#                      within the last hour, not necessarily in a row (default: 2)
 #   NDB_ASSIST_KM      Published beacons within this range get a lower detection
 #                      threshold (default: 1500, 0 = off)
 #   NDB_RADIUS_KM      Decodes are only matched to published beacons within this
@@ -41,6 +46,9 @@ set -- --url "$URL" --stream "$STREAMS" --web-port "$PORT" --web-static "$STATIC
 [ -n "$NDB_PINNED" ]       && set -- "$@" --ndb "$NDB_PINNED"
 [ -n "$NDB_SNR" ]          && set -- "$@" --snr "$NDB_SNR"
 [ -n "$NDB_MAX_CHANNELS" ] && set -- "$@" --max-channels "$NDB_MAX_CHANNELS"
+[ -n "$NDB_REVISIT_MIN" ]  && set -- "$@" --revisit-min "$NDB_REVISIT_MIN"
+[ -n "$NDB_VISIT_TIMEOUT_S" ] && set -- "$@" --visit-timeout "$NDB_VISIT_TIMEOUT_S"
+[ -n "$NDB_IDENT_COPIES" ] && set -- "$@" --ident-copies "$NDB_IDENT_COPIES"
 [ -n "$NDB_ASSIST_KM" ]    && set -- "$@" --assist-km "$NDB_ASSIST_KM"
 [ -n "$NDB_RADIUS_KM" ]    && set -- "$@" --radius-km "$NDB_RADIUS_KM"
 [ -n "$NDB_GGMORSE" ]      && set -- "$@" --ggmorse "$NDB_GGMORSE"

@@ -117,8 +117,14 @@ void usage(const char *argv0)
         "                     (~10x the CPU); off = keying decoder only\n"
         "  --ggmorse-slots N  auto: ggmorse instances at once, per stream (default: 6)\n"
         "  --snr DB           carrier detection threshold above floor (default: %.0f)\n"
-        "  --max-channels N   cap on simultaneous beacons per stream (default: %d)\n"
+        "  --max-channels N   carriers decoded at once, per stream (default: %d)\n"
         "  --drop-after S     forget a beacon unseen for S seconds (default: %.0f)\n"
+        "  --revisit-min M    identified beacons give their channel up and are re-copied\n"
+        "                     every M minutes to confirm they are still heard (default: %.0f)\n"
+        "  --visit-timeout S  a revisit that copies nothing in S seconds is a miss (default: %.0f)\n"
+        "  --ident-copies N   copies of a published beacon's ident (in the last hour, not\n"
+        "                     necessarily in a row) that identify it, or reconfirm it on a\n"
+        "                     revisit (default: %d; first identification always needs 2)\n"
         "\n"
         "Beacon database:\n"
         "  --navaids FILE     OurAirports navaids.csv (default: next to the binary, then\n"
@@ -138,7 +144,8 @@ void usage(const char *argv0)
         "  --web-port N       web UI port (default: %d, 0 = disabled)\n"
         "  --web-static DIR   web UI files (default: ./static)\n",
         argv0, argv0, kMinMarginDefault, ndb::DetectorConfig{}.snr_threshold_db,
-        ndb::DecoderConfig{}.max_channels, ndb::DecoderConfig{}.drop_after_s, kDefaultWebPort);
+        ndb::DecoderConfig{}.max_channels, ndb::DecoderConfig{}.drop_after_s, ndb::DecoderConfig{}.revisit_s / 60.0,
+        ndb::DecoderConfig{}.visit_timeout_s, ndb::DecoderConfig{}.visit_copies, kDefaultWebPort);
 }
 
 std::vector<std::string> split(const std::string &s, char sep)
@@ -210,6 +217,9 @@ bool parse_args(int argc, char **argv, Options &o)
         else if (a == "--snr")          o.dec.detector.snr_threshold_db = float(atof(next("--snr").c_str()));
         else if (a == "--max-channels") o.dec.max_channels = atoi(next("--max-channels").c_str());
         else if (a == "--drop-after")   o.dec.drop_after_s = atof(next("--drop-after").c_str());
+        else if (a == "--revisit-min")  o.dec.revisit_s = 60.0 * atof(next("--revisit-min").c_str());
+        else if (a == "--visit-timeout") o.dec.visit_timeout_s = atof(next("--visit-timeout").c_str());
+        else if (a == "--ident-copies") o.dec.visit_copies = atoi(next("--ident-copies").c_str());
         else if (a == "--navaids")      o.navaids_path = next("--navaids");
         else if (a == "--lat")          o.rx_lat = atof(next("--lat").c_str());
         else if (a == "--lon")          o.rx_lon = atof(next("--lon").c_str());
@@ -234,6 +244,10 @@ bool parse_args(int argc, char **argv, Options &o)
     }
     if (o.min_margin != 0 && (o.min_margin < 15 || o.min_margin > 60)) {
         fprintf(stderr, "error: --min-margin must be 0 (lossless) or 15-60\n");
+        return false;
+    }
+    if (o.dec.revisit_s < 60.0 || o.dec.visit_timeout_s < 30.0 || o.dec.visit_copies < 1) {
+        fprintf(stderr, "error: --revisit-min must be at least 1, --visit-timeout at least 30, --ident-copies at least 1\n");
         return false;
     }
     if (!o.dec.auto_detect && o.dec.pinned_hz.empty()) {
@@ -284,6 +298,7 @@ struct HeardEntry {
     std::string name, country;
     double lat = NAN, lon = NAN, dist_km = -1.0, bearing_deg = -1.0;
     int64_t first_s = 0, last_s = 0;  // wall clock
+    int64_t last_ident_s = 0;   // last copy of the ident; last_s also counts its carrier since
     float  best_snr_db = 0.0f;
     int    best_copies = 0;     // highest ident tally seen
 };
@@ -434,6 +449,7 @@ std::string status_json(App &app)
         if (s.dec) {
             j += ",\"sample_rate\":" + num(s.dec->sample_rate(), 0) + ",\"stream_time\":" + num(s.dec->stream_time());
             j += ",\"waiting\":" + std::to_string(s.dec->waiting());
+            j += ",\"tracking\":" + std::to_string(s.dec->tracking());
             for (auto &c : s.dec->snapshot()) chans.push_back({std::move(c), int(i)});
         }
         j += "}";
@@ -473,6 +489,8 @@ std::string status_json(App &app)
         j += ",\"text\":" + q(c.text) + ",\"text_ggm\":" + q(c.text_ggm) + ",\"pinned\":" + (c.pinned ? "true" : "false");
         j += ",\"age_s\":" + num(c.age_s, 0) + ",\"last_seen_s\":" + num(c.last_seen_s, 0) +
              ",\"last_text_s\":" + num(c.last_text_s, 0);
+        j += ",\"tracking\":" + std::string(c.tracking ? "true" : "false") + ",\"visit\":" + (c.visit ? "true" : "false");
+        j += ",\"ident_age_s\":" + num(c.ident_age_s, 0) + ",\"ident_fresh\":" + (c.ident_fresh ? "true" : "false");
 
         // ... else the nearest few published on this frequency as candidates.
         if (m.nav) j += ",\"navaid\":" + navaid_json(m, exact);
@@ -564,20 +582,34 @@ std::vector<double> known_freqs(App &app)
     return out;
 }
 
+// An ident that matches the published beacon on its frequency is logged on
+// --ident-copies copies (default 2, not necessarily in a row); one that
+// matches nothing needs more, since there is no second source to agree with it.
+constexpr int kUnmatchedCopies = 5;
+
+// Whether the decoder may give a channel up on this ident (see
+// NdbDecoder::accept_ident). Stricter than logging it: a near match (all but
+// the last letter) needs the unmatched count too, so the tally has time to
+// come up with the whole ident before the channel stops decoding.
+bool ident_final(bool matched, bool exact, int copies, int exact_copies)
+{
+    return matched && exact ? copies >= exact_copies : copies >= kUnmatchedCopies;
+}
+
 // Fold the current identifications into the heard log. Called once a second.
 void update_heard(App &app)
 {
+    // An identified beacon is decoded only on its revisits; in between it
+    // counts as heard while its carrier is there and its last copy is
+    // recent (ident_fresh). So last_s follows the carrier, and last_ident_s
+    // the copies themselves.
     std::vector<ndb::ChannelSnapshot> snaps;
     for (auto &sp : app.streams) {
         std::lock_guard<std::mutex> lk(sp->mu);
         if (!sp->dec) continue;
         for (auto &c : sp->dec->snapshot())
-            if (!c.ident.empty() && c.last_seen_s < 60) snaps.push_back(std::move(c));
+            if (!c.ident.empty() && c.last_seen_s < 60 && c.ident_fresh) snaps.push_back(std::move(c));
     }
-    // An ident that matches the published beacon on its frequency is logged
-    // on the tally's usual two copies; one that matches nothing needs more,
-    // since there is no second source to agree with it.
-    constexpr int kUnmatchedCopies = 5;
     if (snaps.empty()) return;
     const int64_t now = now_ms() / 1000;
     std::lock_guard<std::mutex> nlk(app.navaids_mu);
@@ -585,7 +617,7 @@ void update_heard(App &app)
     for (const auto &c : snaps) {
         bool exact = false;
         auto m = app.navaids.match(c.freq_hz, c.ident, exact);
-        if (!m.nav && c.ident_count < kUnmatchedCopies) continue;
+        if (c.ident_count < (m.nav ? app.o.dec.visit_copies : kUnmatchedCopies)) continue;
         const std::string ident = m.nav ? m.nav->ident : c.ident;
         char key[64];
         snprintf(key, sizeof key, "%s@%.1f", ident.c_str(), (m.nav ? m.nav->freq_hz : c.freq_hz) / 1e3);
@@ -608,6 +640,7 @@ void update_heard(App &app)
             e.bearing_deg = m.bearing_deg;
         }
         e.last_s = now;
+        e.last_ident_s = std::max(e.last_ident_s, now - int64_t(std::max(0.0, c.ident_age_s)));
         e.best_snr_db = std::max(e.best_snr_db, c.snr_db);
         e.best_copies = std::max(e.best_copies, c.ident_count);
         app.heard_dirty = true;
@@ -640,6 +673,7 @@ std::string heard_json(App &app)
              ",\"dist_km\":" + (e.dist_km >= 0 ? num(e.dist_km, 0) : "null") +
              ",\"bearing_deg\":" + (e.bearing_deg >= 0 ? num(e.bearing_deg, 0) : "null") +
              ",\"first_s\":" + std::to_string(e.first_s) + ",\"last_s\":" + std::to_string(e.last_s) +
+             ",\"last_ident_s\":" + std::to_string(e.last_ident_s) +
              ",\"best_snr_db\":" + num(e.best_snr_db) + ",\"best_copies\":" + std::to_string(e.best_copies) + "}";
     }
     return j + "]}";
@@ -698,6 +732,7 @@ std::string beacons_json(App &app, long max_age_s)
              ",\"dist_km\":" + (e.dist_km >= 0 ? num(e.dist_km, 0) : "null") +
              ",\"bearing_deg\":" + (e.bearing_deg >= 0 ? num(e.bearing_deg, 0) : "null") +
              ",\"first_heard\":" + std::to_string(e.first_s) + ",\"last_heard\":" + std::to_string(e.last_s) +
+             ",\"last_identified\":" + std::to_string(e.last_ident_s) +
              ",\"age_s\":" + std::to_string(now - e.last_s) + ",\"best_snr_db\":" + num(e.best_snr_db) +
              ",\"live\":" + (lv != live_snr.end() ? "true" : "false") +
              ",\"snr_db\":" + (lv != live_snr.end() ? num(lv->second) : "null") + "}";
@@ -718,10 +753,10 @@ void save_heard(App &app)
         if (!f) { fprintf(stderr, "warning: cannot write %s\n", tmp.c_str()); return; }
         for (const auto &[key, e] : app.heard) {
             auto clean = [](std::string s) { for (char &c : s) if (c == '\t' || c == '\n') c = ' '; return s; };
-            fprintf(f, "%s\t%s\t%d\t%.1f\t%s\t%s\t%.5f\t%.5f\t%.0f\t%.0f\t%lld\t%lld\t%.1f\t%d\n", clean(key).c_str(),
+            fprintf(f, "%s\t%s\t%d\t%.1f\t%s\t%s\t%.5f\t%.5f\t%.0f\t%.0f\t%lld\t%lld\t%.1f\t%d\t%lld\n", clean(key).c_str(),
                     clean(e.ident).c_str(), e.confirmed ? 1 : 0, e.freq_hz, clean(e.name).c_str(), clean(e.country).c_str(),
                     e.lat, e.lon, e.dist_km, e.bearing_deg, (long long)e.first_s, (long long)e.last_s, e.best_snr_db,
-                    e.best_copies);
+                    e.best_copies, (long long)e.last_ident_s);
         }
         fclose(f);
         app.heard_dirty = false;
@@ -743,7 +778,7 @@ void load_heard(App &app)
         size_t a = 0, b;
         while ((b = line.find('\t', a)) != std::string::npos) { v.push_back(line.substr(a, b - a)); a = b + 1; }
         v.push_back(line.substr(a));
-        if (v.size() != 14) continue;
+        if (v.size() != 14 && v.size() != 15) continue;   // 14: before last_ident_s
         HeardEntry e;
         e.ident = v[1];
         e.confirmed = v[2] == "1";
@@ -758,6 +793,7 @@ void load_heard(App &app)
         e.last_s = atoll(v[11].c_str());
         e.best_snr_db = float(atof(v[12].c_str()));
         e.best_copies = atoi(v[13].c_str());
+        e.last_ident_s = v.size() > 14 ? atoll(v[14].c_str()) : e.last_s;
         app.heard[v[0]] = e;
         ++n;
     }
@@ -1019,6 +1055,13 @@ struct IqSink {
             if (app.navaids.size() > 0) st.dec->set_known(known_freqs(app));
             const int base = st.index * 1000;
             App *a = &app;
+            // Stream lock, then navaids: the order everything else takes them in.
+            st.dec->accept_ident = [a](double f, const std::string &ident, int copies) {
+                std::lock_guard<std::mutex> nlk(a->navaids_mu);
+                bool exact = false;
+                auto m = a->navaids.match(f, ident, exact);
+                return ident_final(bool(m.nav), exact, copies, a->o.dec.visit_copies);
+            };
             st.dec->on_decode = [a, base](int id, double f, const std::string &text) {
                 std::lock_guard<std::mutex> lk(a->decodes_mu);
                 a->decodes_pending.push_back({now_ms(), base + id, f, text});
@@ -1187,10 +1230,12 @@ void run_file(App &app)
 
 void print_summary(App &app)
 {
-    std::lock_guard<std::mutex> nlk(app.navaids_mu);
     for (auto &sp : app.streams) {
+        // Stream lock before navaids, as everywhere else (the decoder's
+        // accept_ident takes navaids under the stream lock).
         std::lock_guard<std::mutex> lk(sp->mu);
         if (!sp->dec) continue;
+        std::lock_guard<std::mutex> nlk(app.navaids_mu);
         fprintf(stderr, "\n[s%d] %-10s %5s %5s %4s %5s  %-7s %-22s %s\n", sp->index, "freq_hz", "snr", "pitch", "wpm",
                 "cost", "ident", "navaid", "text");
         for (const auto &c : sp->dec->snapshot()) {
