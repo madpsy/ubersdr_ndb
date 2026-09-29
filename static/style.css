@@ -43,6 +43,8 @@ header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 }
 .header-text h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.02em; }
 .header-text p  { font-size: 11px; color: var(--muted); margin-top: 1px; }
+#subtitle .call { color: var(--text); font-weight: 600; }
+#subtitle .sep  { color: var(--border); margin: 0 6px; }
 
 #search-wrap {
   margin-left: auto; display: flex; align-items: center; gap: 6px;

@@ -80,9 +80,15 @@ function renderHeader() {
   else if (live > 0) { st.className = 'status-warn'; st.textContent = `${live}/${s.streams.length} streams`; }
   else { st.className = 'status-err'; st.textContent = s.streams[0]?.message || 'Disconnected'; }
 
+  // Which receiver this is, as the other UberSDR addons show it: callsign
+  // first, then name and location.
   const rx = s.receiver || {};
-  const where = [rx.name, rx.location].filter(Boolean).join(' — ');
-  $('subtitle').textContent = where || 'Non-directional beacons — every carrier in the IQ passband, decoded in parallel';
+  const bits = [rx.name, rx.location].filter(Boolean).map(esc);
+  if (rx.callsign || bits.length) {
+    $('subtitle').innerHTML = (rx.callsign ? `<span class="call">${esc(rx.callsign)}</span>` : '') +
+      (rx.callsign && bits.length ? '<span class="sep">·</span>' : '') + bits.join('<span class="sep">·</span>');
+  }
+  if (rx.callsign) document.title = `${rx.callsign} — NDB Decoder`;
 
   const chans = s.channels;
   const idd = chans.filter((c) => c.navaid || c.ident);
