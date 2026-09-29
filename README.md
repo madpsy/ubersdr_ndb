@@ -2,7 +2,7 @@
 
 **Multi-beacon NDB decoder addon for [UberSDR](https://github.com/madpsy/ka9q_ubersdr)**
 
-Requests one or more wideband IQ streams from UberSDR, finds every non-directional beacon (NDB) carrier in them, and decodes each beacon's Morse ident **in parallel**. Decoded idents are matched against the [OurAirports](https://ourairports.com/data/) navaid database and located relative to the receiver. A web UI shows the spectrum, a live beacon table, the copy as it is decoded, a persistent heard log, and a map.
+Requests one or more wideband IQ streams from UberSDR, finds every non-directional beacon (NDB) carrier in them, and decodes each beacon's Morse ident **in parallel**. Decoded idents are matched against the [OurAirports](https://ourairports.com/data/) navaid database and located relative to the receiver. A web UI shows the spectrum, a live beacon table, the copy as it is decoded, a persistent heard log, a map, and reception stats over time for propagation.
 
 The default, one `iq192` stream centred on 356 kHz, covers roughly 270–442 kHz and costs a single UberSDR session, however many beacons are in it. It's chosen from the navaid list: the UK and Ireland's 110 NDBs sit on 77 frequencies from 277 to 545 kHz, all but one of them at 277–434 kHz. This window takes in every one except Lichfield (545 kHz); add `545000:iq48` for that. For another region, see [Streams](#streams).
 
@@ -32,7 +32,8 @@ NdbChannel (one per beacon)
         most frequent clean 2–4 char token over the last hour
         │
         ▼
-main.cpp ─ navaid match, heard log (/data/heard.tsv), HTTP + WebSocket
+main.cpp ─ navaid match, heard log (/data/heard.tsv), reception history
+           (/data/history.tsv), HTTP + WebSocket
         │
         ▼
 Browser: static/index.html + app.js  (spectrum · beacons · map · live copy · heard log)
@@ -157,6 +158,10 @@ Plain `iq` (10 kHz) is not supported. It is too narrow to be worth it, and each 
 
 ## Web UI and API
 
+**Reception stats** (the Stats button, or `#stats` on the URL): beacons heard per hour and the furthest heard per hour, over 24 hours, 7 or 30 days; by hour of day, the average heard at once and, per distance band, the share of time its beacons were heard — where skywave opening up at night shows; and every beacon, least heard first, with its availability, SNR and a 24-cell hour-of-day strip, plus the published beacons never heard. Hour of day is UTC or the receiver's own time zone (from UberSDR's `/api/description`). Each section downloads as CSV.
+
+History is sampled once a minute into 15-minute buckets and kept 30 days in `DATA_DIR/history.tsv`, which is rewritten daily without expired buckets, so it stays bounded (a few MB); `heard.tsv` is capped at 2000 beacons.
+
 | Endpoint | |
 |---|---|
 | `GET /` | the UI (`static/`) |
@@ -164,6 +169,7 @@ Plain `iq` (10 kHz) is not supported. It is too narrow to be worth it, and each 
 | `GET /api/status` | streams, receiver, every channel with its navaid match and candidates |
 | `GET /api/spectrum` | averaged spectrum + floor per stream (2048 points) |
 | `GET /api/beacons?max_age=300` | **for polling:** identified beacons heard in the last `max_age` seconds (1–604800, default 300; anything else is a `400`), most recent first, with position, distance, first/last heard, `last_identified` (the last copy of the ident; `last_heard` also counts its carrier between revisits), best SNR, and current SNR if live |
+| `GET /api/stats?hours=168` | reception history for the stats view (1–720 hours, default 168): minutes heard and mean SNR per beacon per hour, receiver uptime per hour, and the published beacons in band and radius not heard. Per-hour values are strings of one base64 character per hour (0–63), first hour `t0`. |
 | `GET /api/heard` | heard log |
 | `GET /api/decodes` | recent live copy |
 | `GET /api/navaids?max_km=…` | published NDBs in the covered band (default radius `NDB_RADIUS_KM`) |

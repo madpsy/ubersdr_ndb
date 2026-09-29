@@ -37,6 +37,7 @@
 #include <memory>
 #include <mutex>
 #include <random>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -278,6 +279,7 @@ struct Receiver {
     bool   have_pos = false;
     double lat = 0.0, lon = 0.0;
     std::string name, location, callsign;
+    std::string timezone;           // IANA, e.g. "Europe/London" ("" = unknown)
 };
 
 // One chunk of live copy, as ggmorse produced it.
@@ -303,6 +305,22 @@ struct HeardEntry {
     int    best_copies = 0;     // highest ident tally seen
 };
 
+// Reception history: once a minute, which beacons are heard now, folded into
+// 15-minute buckets. Per beacon, the minutes it was heard and its SNR; per
+// bucket, the minutes the receiver was up (any stream connected), which is
+// what availability is measured against. Kept 30 days.
+constexpr int64_t kHistBucketS = 900;
+constexpr int64_t kHistKeepS = 30 * 86400;
+struct HistAgg {
+    int   minutes = 0;
+    float snr_sum = 0.0f;
+    float snr_max = -1e9f;
+};
+struct HistBucket {
+    int up_min = 0;
+    std::map<std::string, HistAgg> beacons;     // key: as the heard log's
+};
+
 struct App {
     Options o;
     std::vector<std::unique_ptr<Stream>> streams;
@@ -317,6 +335,14 @@ struct App {
     std::mutex heard_mu;
     std::map<std::string, HeardEntry> heard;    // key: ident@kHz
     bool heard_dirty = false;
+    std::map<std::string, float> heard_now;     // key -> SNR: what update_heard() last found current
+
+    // Reception history for the stats view (see history_sample()).
+    std::mutex hist_mu;
+    std::map<int64_t, HistBucket> history;      // bucket start (wall clock) -> bucket
+    int64_t hist_minute = 0;                    // last minute sampled
+    int64_t hist_flushed = 0;                   // buckets up to this start are on disk
+    int64_t hist_compacted = 0;                 // history.tsv last rewritten
 };
 
 int64_t now_ms()
@@ -430,7 +456,7 @@ std::string status_json(App &app)
     {
         std::lock_guard<std::mutex> lk(app.rx.mu);
         j += ",\"receiver\":{\"name\":" + q(app.rx.name) + ",\"location\":" + q(app.rx.location) +
-             ",\"callsign\":" + q(app.rx.callsign);
+             ",\"callsign\":" + q(app.rx.callsign) + ",\"timezone\":" + q(app.rx.timezone);
         if (app.rx.have_pos) j += ",\"lat\":" + num(app.rx.lat, 5) + ",\"lon\":" + num(app.rx.lon, 5);
         j += "}";
     }
@@ -610,10 +636,15 @@ void update_heard(App &app)
         for (auto &c : sp->dec->snapshot())
             if (!c.ident.empty() && c.last_seen_s < 60 && c.ident_fresh) snaps.push_back(std::move(c));
     }
-    if (snaps.empty()) return;
+    if (snaps.empty()) {
+        std::lock_guard<std::mutex> hlk(app.heard_mu);
+        app.heard_now.clear();
+        return;
+    }
     const int64_t now = now_ms() / 1000;
     std::lock_guard<std::mutex> nlk(app.navaids_mu);
     std::lock_guard<std::mutex> hlk(app.heard_mu);
+    app.heard_now.clear();
     for (const auto &c : snaps) {
         bool exact = false;
         auto m = app.navaids.match(c.freq_hz, c.ident, exact);
@@ -621,6 +652,8 @@ void update_heard(App &app)
         const std::string ident = m.nav ? m.nav->ident : c.ident;
         char key[64];
         snprintf(key, sizeof key, "%s@%.1f", ident.c_str(), (m.nav ? m.nav->freq_hz : c.freq_hz) / 1e3);
+        auto &hn = app.heard_now[key];
+        hn = std::max(hn, c.snr_db);
         auto &e = app.heard[key];
         if (e.first_s == 0) {
             e.first_s = now;
@@ -798,6 +831,228 @@ void load_heard(App &app)
         ++n;
     }
     if (n) fprintf(stderr, "heard log: %zu beacons from %s/heard.tsv\n", n, app.o.data_dir.c_str());
+}
+
+// history.tsv: one line per beacon per bucket — start, key, minutes heard,
+// SNR sum, SNR max — plus a "*" line per bucket whose minutes are the
+// receiver's. Appended as each bucket closes, and on exit for the one still
+// open. Lines for the same bucket and key add up, so a bucket split across a
+// restart reads back whole.
+void append_history(App &app, int64_t t, const HistBucket &b)
+{
+    if (app.o.data_dir.empty()) return;
+    FILE *f = fopen((app.o.data_dir + "/history.tsv").c_str(), "a");
+    if (!f) return;
+    fprintf(f, "%lld\t*\t%d\t0\t0\n", (long long)t, b.up_min);
+    for (const auto &[key, a] : b.beacons)
+        fprintf(f, "%lld\t%s\t%d\t%.1f\t%.1f\n", (long long)t, key.c_str(), a.minutes, a.snr_sum, a.snr_max);
+    fclose(f);
+}
+
+// Rewrite history.tsv from memory, which holds only the last kHistKeepS:
+// expired buckets go, and split ones are merged. At startup and once a day,
+// so the file stays bounded however long the decoder runs.
+void compact_history(App &app)
+{
+    if (app.o.data_dir.empty()) return;
+    const std::string path = app.o.data_dir + "/history.tsv", tmp = path + ".tmp";
+    FILE *f = fopen(tmp.c_str(), "w");
+    if (!f) { fprintf(stderr, "warning: cannot write %s\n", tmp.c_str()); return; }
+    for (const auto &[t, b] : app.history) {
+        if (t > app.hist_flushed) break;   // not closed yet: appended when it is
+        fprintf(f, "%lld\t*\t%d\t0\t0\n", (long long)t, b.up_min);
+        for (const auto &[key, a] : b.beacons)
+            fprintf(f, "%lld\t%s\t%d\t%.1f\t%.1f\n", (long long)t, key.c_str(), a.minutes, a.snr_sum, a.snr_max);
+    }
+    fclose(f);
+    rename(tmp.c_str(), path.c_str());
+    app.hist_compacted = now_ms() / 1000;
+}
+
+void load_history(App &app)
+{
+    if (app.o.data_dir.empty()) return;
+    const std::string path = app.o.data_dir + "/history.tsv";
+    const int64_t cutoff = now_ms() / 1000 - kHistKeepS;
+    std::ifstream in(path);
+    std::string line;
+    while (std::getline(in, line)) {
+        char key[128];
+        long long t;
+        int minutes;
+        float sum, mx;
+        if (sscanf(line.c_str(), "%lld\t%127[^\t]\t%d\t%f\t%f", &t, key, &minutes, &sum, &mx) != 5) continue;
+        if (t < cutoff) continue;
+        auto &b = app.history[t];
+        if (key[0] == '*' && !key[1]) {
+            b.up_min += minutes;
+            continue;
+        }
+        auto &a = b.beacons[key];
+        a.minutes += minutes;
+        a.snr_sum += sum;
+        a.snr_max = std::max(a.snr_max, mx);
+    }
+    in.close();
+    if (!app.history.empty()) app.hist_flushed = app.history.rbegin()->first;
+    compact_history(app);
+    if (!app.history.empty()) {
+        fprintf(stderr, "history: %zu buckets from %s\n", app.history.size(), path.c_str());
+    }
+}
+
+// Once a minute: which beacons are heard now (from update_heard()), into the
+// current bucket. Closed buckets go to disk; expired ones are dropped.
+void history_sample(App &app, bool final = false)
+{
+    const int64_t now = now_ms() / 1000;
+    const int64_t minute = now / 60;
+    const int64_t bucket = now - now % kHistBucketS;
+    bool up = false;
+    for (auto &sp : app.streams) up = up || sp->connected;
+    std::map<std::string, float> heard;
+    {
+        std::lock_guard<std::mutex> hlk(app.heard_mu);
+        heard = app.heard_now;
+    }
+    std::lock_guard<std::mutex> lk(app.hist_mu);
+    if (!final && minute != app.hist_minute) {
+        app.hist_minute = minute;
+        auto &b = app.history[bucket];
+        if (up) {
+            b.up_min++;
+            for (const auto &[key, snr] : heard) {
+                auto &a = b.beacons[key];
+                a.minutes++;
+                a.snr_sum += snr;
+                a.snr_max = std::max(a.snr_max, snr);
+            }
+        }
+    }
+    for (auto it = app.history.upper_bound(app.hist_flushed); it != app.history.end(); ++it) {
+        if (it->first >= bucket && !final) break;
+        append_history(app, it->first, it->second);
+        app.hist_flushed = it->first;
+    }
+    while (!app.history.empty() && app.history.begin()->first < now - kHistKeepS) app.history.erase(app.history.begin());
+    if (!final && now - app.hist_compacted > 86400) compact_history(app);
+}
+
+// The stats view: the last `hours` of history, hour by hour, joined with the
+// heard log for names and distances; plus the published beacons in band and
+// radius that were not heard at all. The browser does the binning (by hour
+// of day in UTC or the receiver's own time zone, by distance), so per beacon
+// this sends its minutes heard and mean SNR for every hour, each hour one
+// character of kHourChars (value 0-63), a string of `hours` characters.
+std::string stats_json(App &app, int hours)
+{
+    static const char kHourChars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const int64_t now = now_ms() / 1000;
+    const int64_t t0 = now - now % 3600 - int64_t(hours - 1) * 3600;   // first hour shown
+
+    struct Beacon {
+        int minutes = 0;
+        float snr_sum = 0.0f, snr_max = -1e9f;
+        std::vector<int> mins;
+        std::vector<float> snr;
+        int64_t first = 0, last = 0;
+    };
+    std::map<std::string, Beacon> beacons;
+    std::vector<int> up(hours, 0);
+    int up_total = 0;
+    {
+        std::lock_guard<std::mutex> lk(app.hist_mu);
+        for (auto it = app.history.lower_bound(t0); it != app.history.end(); ++it) {
+            const int64_t t = it->first;
+            const int i = int((t - t0) / 3600);
+            if (i < 0 || i >= hours) continue;
+            const auto &b = it->second;
+            up[i] += b.up_min;
+            up_total += b.up_min;
+            for (const auto &[key, a] : b.beacons) {
+                if (a.minutes <= 0) continue;
+                auto &bc = beacons[key];
+                if (bc.mins.empty()) { bc.mins.assign(hours, 0); bc.snr.assign(hours, 0.0f); }
+                bc.minutes += a.minutes;
+                bc.snr_sum += a.snr_sum;
+                bc.snr_max = std::max(bc.snr_max, a.snr_max);
+                bc.mins[i] += a.minutes;
+                bc.snr[i] += a.snr_sum;
+                if (!bc.first) bc.first = t;
+                bc.last = std::min(t + kHistBucketS, now);
+            }
+        }
+    }
+
+    std::map<std::string, HeardEntry> meta;
+    {
+        std::lock_guard<std::mutex> hlk(app.heard_mu);
+        for (const auto &[key, e] : app.heard)
+            if (beacons.count(key)) meta[key] = e;
+    }
+    std::string tz;
+    {
+        std::lock_guard<std::mutex> lk(app.rx.mu);
+        tz = app.rx.timezone;
+    }
+
+    auto enc = [&](int v) { return kHourChars[std::clamp(v, 0, 63)]; };
+    std::string j = "{\"now\":" + std::to_string(now) + ",\"hours\":" + std::to_string(hours) +
+                    ",\"t0\":" + std::to_string(t0) + ",\"timezone\":" + q(tz) +
+                    ",\"up_minutes\":" + std::to_string(up_total) + ",\"up\":\"";
+    for (int v : up) j += enc(v);
+    j += "\",\"beacons\":[";
+    bool first = true;
+    std::set<std::string> heard_keys;
+    for (const auto &[key, b] : beacons) {
+        // Same visibility as the heard log.
+        auto m = meta.find(key);
+        if (m == meta.end()) continue;
+        const auto &e = m->second;
+        if (!e.confirmed && !app.o.show_unlisted) continue;
+        if (e.confirmed && app.o.map_km > 0 && e.dist_km > app.o.map_km) continue;
+        heard_keys.insert(key);
+        if (!first) j += ",";
+        first = false;
+        j += "{\"key\":" + q(key) + ",\"ident\":" + q(e.ident) + ",\"confirmed\":" + (e.confirmed ? "true" : "false") +
+             ",\"name\":" + q(e.name) + ",\"country\":" + q(e.country) + ",\"freq_hz\":" + num(e.freq_hz) +
+             ",\"dist_km\":" + (e.dist_km >= 0 ? num(e.dist_km, 0) : "null") +
+             ",\"bearing_deg\":" + (e.bearing_deg >= 0 ? num(e.bearing_deg, 0) : "null") +
+             ",\"minutes\":" + std::to_string(b.minutes) + ",\"snr_mean\":" + num(b.snr_sum / b.minutes) +
+             ",\"snr_best\":" + num(b.snr_max) + ",\"first_s\":" + std::to_string(b.first) +
+             ",\"last_s\":" + std::to_string(b.last) + ",\"m\":\"";
+        for (int i = 0; i < hours; ++i) j += enc(b.mins[i]);
+        j += "\",\"s\":\"";
+        for (int i = 0; i < hours; ++i) j += enc(b.mins[i] ? int(std::lround(b.snr[i] / b.mins[i])) : 0);
+        j += "\"}";
+    }
+
+    // Published beacons in band and radius that nothing was heard from.
+    std::vector<std::pair<double, double>> bands;
+    for (auto &sp : app.streams) {
+        std::lock_guard<std::mutex> lk(sp->mu);
+        double half = sp->dec ? 0.45 * sp->dec->sample_rate() : 0.0;
+        if (half > 0) bands.push_back({sp->spec.center_hz - half, sp->spec.center_hz + half});
+    }
+    j += "],\"unheard\":[";
+    first = true;
+    std::lock_guard<std::mutex> nlk(app.navaids_mu);
+    for (const auto &n : app.navaids.all()) {
+        bool in = false;
+        for (auto &b : bands) in = in || (n.freq_hz >= b.first && n.freq_hz <= b.second);
+        if (!in) continue;
+        auto h = app.navaids.locate(n);
+        if (app.o.map_km > 0 && h.dist_km >= 0 && h.dist_km > app.o.map_km) continue;
+        char key[64];
+        snprintf(key, sizeof key, "%s@%.1f", n.ident.c_str(), n.freq_hz / 1e3);
+        if (heard_keys.count(key)) continue;
+        if (!first) j += ",";
+        first = false;
+        j += "{\"ident\":" + q(n.ident) + ",\"name\":" + q(n.name) + ",\"country\":" + q(n.country) +
+             ",\"freq_hz\":" + num(n.freq_hz, 0) + ",\"dist_km\":" + (h.dist_km >= 0 ? num(h.dist_km, 0) : "null") +
+             ",\"bearing_deg\":" + (h.bearing_deg >= 0 ? num(h.bearing_deg, 0) : "null") + "}";
+    }
+    return j + "]}";
 }
 
 std::string decodes_json(const std::vector<DecodeEvent> &ev, bool backfill)
@@ -992,6 +1247,7 @@ void fetch_receiver(App &app)
     app.rx.name = json_scalar_after(body, "receiver", "name");
     app.rx.location = json_scalar_after(body, "receiver", "location");
     app.rx.callsign = json_scalar_after(body, "receiver", "callsign");
+    app.rx.timezone = json_scalar_after(body, "receiver", "timezone");
     if (!app.rx.have_pos) {
         std::string la = json_scalar_after(body, "gps", "lat"), lo = json_scalar_after(body, "gps", "lon");
         if (!la.empty() && !lo.empty()) {
@@ -1356,6 +1612,23 @@ std::unique_ptr<ix::HttpServer> start_web(App &app)
                 } else {
                     resp->body = beacons_json(app, max_age);
                 }
+            } else if (api && leaf == "stats") {
+                // hours: 1..720 (30 days, what history keeps); default 168.
+                const std::string raw = query_param(req->uri, "hours");
+                long hours = 168;
+                bool ok = true;
+                if (!raw.empty()) {
+                    ok = raw.size() <= 4 && std::all_of(raw.begin(), raw.end(), [](char c) { return c >= '0' && c <= '9'; });
+                    if (ok) hours = std::stol(raw);
+                    ok = ok && hours >= 1 && hours <= kHistKeepS / 3600;
+                }
+                resp->headers["Content-Type"] = "application/json";
+                if (!ok) {
+                    resp->statusCode = 400;
+                    resp->body = "{\"error\":\"hours must be a whole number from 1 to 720\"}";
+                } else {
+                    resp->body = stats_json(app, int(hours));
+                }
             } else if (api && leaf == "search") {
                 resp->headers["Content-Type"] = "application/json";
                 resp->body = search_json(app, url_decode(query_param(req->uri, "q")), 60);
@@ -1456,6 +1729,7 @@ int main(int argc, char **argv)
     }
 
     load_heard(app);
+    load_history(app);
 
     // NDB_SHOW_UNLISTED off (the default) means "the known list only", for
     // candidates as well as idents: carriers with no published beacon near
@@ -1498,7 +1772,10 @@ int main(int argc, char **argv)
         for (uint64_t tick = 1; g_running; ++tick) {
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
             auto fresh = take_decodes(app);
-            if (tick % 4 == 0) update_heard(app);
+            if (tick % 4 == 0) {
+                update_heard(app);
+                history_sample(app);
+            }
             if (tick % 240 == 0) save_heard(app);
             if (!web) continue;
             auto clients = web->getClients();
@@ -1544,6 +1821,7 @@ int main(int argc, char **argv)
     if (pusher.joinable()) pusher.join();
     update_heard(app);
     save_heard(app);
+    history_sample(app, true);
     if (web) web->stop();
     ix::uninitNetSystem();
     curl_global_cleanup();

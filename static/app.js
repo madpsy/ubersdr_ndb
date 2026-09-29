@@ -997,4 +997,7 @@ window.addEventListener('resize', () => { drawSpectra(); map?.invalidateSize(); 
 setInterval(() => { state.navaidsKey = ''; refreshNavaids(); }, 10 * 60 * 1000);
 initMap();
 connect();
+
+// What stats.js shares.
+window.ndb = { $, esc, flag, compass, tip, state };
 })();

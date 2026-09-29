@@ -26,6 +26,10 @@
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><circle cx="6.5" cy="6.5" r="5" stroke="currentColor" stroke-width="1.5"/><line x1="10.5" y1="10.5" x2="14.5" y2="14.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
     Find NDB
   </button>
+  <button id="stats-open" class="btn" title="Reception stats: beacons heard over time, by hour of day and distance">
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M2 14V9M6 14V5M10 14V8M14 14V2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    Stats
+  </button>
   <label class="toggle" title="Hide carriers with no decoded ident">
     <input type="checkbox" id="ident-only"> Identified only
   </label>
@@ -126,12 +130,76 @@
   </div>
 </div>
 
+<div id="stats-modal" class="modal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-box stats-box" role="dialog" aria-modal="true" aria-labelledby="stats-title">
+    <div class="modal-head">
+      <h2 id="stats-title">Reception stats</h2>
+      <span class="hint" id="stats-status"></span>
+      <button class="modal-x" data-close title="Close (Esc)">✕</button>
+    </div>
+    <div class="stats-controls">
+      <div class="seg" id="stats-range" role="group" aria-label="Window">
+        <button data-h="24">24 h</button><button data-h="168" class="on">7 days</button><button data-h="720">30 days</button>
+      </div>
+      <div class="seg" id="stats-tz" role="group" aria-label="Time zone">
+        <button data-tz="utc" class="on">UTC</button><button data-tz="local">Receiver local</button>
+      </div>
+      <button class="btn small" id="stats-refresh" title="Reload">↻</button>
+    </div>
+    <div id="stats-body">
+      <div id="sx-empty" class="empty" hidden>No history yet — it builds up a minute at a time while the decoder runs (kept 30 days).</div>
+      <div id="sx-content">
+        <section id="sx-kpis" class="sx-kpis"></section>
+
+        <section class="sx-sec">
+          <div class="sx-sec-head"><h3>Over time</h3><span class="hint">hourly · gaps where the receiver was down</span>
+            <button class="btn small" id="sx-csv-time">CSV</button></div>
+          <div class="sx-chart-title">Beacons heard per hour</div>
+          <div class="sx-chart" id="sx-count"></div>
+          <div class="sx-chart-title">Furthest beacon heard per hour (km)</div>
+          <div class="sx-chart" id="sx-far"></div>
+        </section>
+
+        <section class="sx-sec">
+          <div class="sx-sec-head"><h3 id="sx-hod-title">By hour of day</h3>
+            <button class="btn small" id="sx-csv-hod">CSV</button></div>
+          <div class="sx-chart-title">Average beacons heard at once</div>
+          <div class="sx-chart" id="sx-hod"></div>
+          <div class="sx-chart-title">Share of time heard, by distance
+            <span class="hint">beacons heard at least once in the window, per band</span>
+            <span class="sx-legend">0%<i></i>100%</span></div>
+          <div class="sx-chart" id="sx-heat"></div>
+        </section>
+
+        <section class="sx-sec">
+          <div class="sx-sec-head"><h3>Beacons</h3><span class="hint">least heard first · click a row for its SNR over time</span>
+            <label class="toggle small"><input type="checkbox" id="sx-include-unheard"> <span>Include never heard (<span id="sx-unheard-n">0</span>)</span></label>
+            <button class="btn small" id="sx-csv-beacons">CSV</button></div>
+          <div class="sx-table-wrap">
+            <table id="sx-table">
+              <thead><tr>
+                <th data-sort="ident">Ident</th><th data-sort="name">Station</th><th data-sort="freq">kHz</th>
+                <th data-sort="dist" class="num">Distance</th><th data-sort="avail" class="num">Heard</th>
+                <th class="num">Time</th><th data-sort="snr" class="num">Mean SNR</th><th data-sort="best" class="num">Best</th>
+                <th id="sx-strip-h">By hour</th><th data-sort="last" class="num">Last heard</th>
+              </tr></thead>
+              <tbody id="sx-rows"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</div>
+
 <p class="footnote">Beacon data: <a href="https://ourairports.com/data/" target="_blank" rel="noopener">OurAirports</a> (public domain).
 Morse: <a href="https://github.com/ggerganov/ggmorse" target="_blank" rel="noopener">ggmorse</a>.
-API: <a href="api/beacons?max_age=300" target="_blank" rel="noopener"><code>api/beacons?max_age=300</code></a> — beacons heard in the last <i>max_age</i> seconds (1–604800), as JSON.
+API: <a href="api/beacons?max_age=300" target="_blank" rel="noopener"><code>api/beacons?max_age=300</code></a> — beacons heard in the last <i>max_age</i> seconds (1–604800), as JSON; <a href="api/stats?hours=24" target="_blank" rel="noopener"><code>api/stats?hours=24</code></a> — reception history (1–720 h).
 ✓ decoded ident matches the published beacon · ≈ matches all but the last letter · <i>italic</i> = unconfirmed nearest candidate.</p>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script src="app.js"></script>
+<script src="stats.js"></script>
 </body>
 </html>
