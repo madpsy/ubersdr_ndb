@@ -192,6 +192,7 @@ tbody tr.stale { opacity: 0.55; }
 .copy span { direction: ltr; unicode-bidi: bidi-override; }
 .copy b { color: var(--text); font-weight: 600; }
 .copy .nokey { font-family: var(--font); font-size: 11px; font-style: italic; }
+.copy .fold { font-style: italic; }
 .empty { padding: 28px 10px !important; text-align: center; color: var(--muted); cursor: default; }
 
 /* ── Leaflet, dark ──────────────────────────────────────── */

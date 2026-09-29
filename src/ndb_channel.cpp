@@ -35,6 +35,9 @@ NdbChannel::NdbChannel(int id, double center_hz, double offset_hz, double fs, bo
       key_(kAudioRate), created_(now_s), last_seen_(now_s), now_(now_s)
 {
     key_.on_text = [this](const std::string &s) { on_text(s, now_, Source::Keying); };
+    key_.on_envelope = [this](float e) { fold_.push(e); };
+    key_.on_retone = [this] { fold_.reset(); };
+    fold_.on_text = [this](const std::string &s) { on_text(s, now_, Source::Fold); };
     rot_.set(offset_hz, fs);
 
     // Stage 1: fs → 16 kHz. Only needs to protect ±kPassHz from what folds
@@ -144,7 +147,11 @@ void NdbChannel::process(const cf *x, size_t n, double now_s)
         on_audio(std::clamp(a, -2.0f, 2.0f));
     }
     run_morse();
-    if (key_.keying() || (last_text_ >= 0 && now_s - last_text_ < 1.0)) last_active_ = now_s;
+    // A clear ident cycle counts as keying too: it is how a beacon too weak
+    // for the keying decoder shows itself.
+    if (key_.keying() || fold_.periodicity() >= FoldDecoder::kMinPeriodicity ||
+        (last_text_ >= 0 && now_s - last_text_ < 1.0))
+        last_active_ = now_s;
 }
 
 void NdbChannel::on_audio(float a)
@@ -221,8 +228,8 @@ void NdbChannel::run_morse()
 void NdbChannel::on_text(const std::string &s, double now_s, Source src)
 {
     const bool primary = src == Source::Keying;
-    std::string &text = primary ? text_ : text_ggm_;
-    std::string &token = primary ? token_key_ : token_ggm_;
+    std::string &text = primary ? text_ : src == Source::Ggmorse ? text_ggm_ : text_fold_;
+    std::string &token = primary ? token_key_ : src == Source::Ggmorse ? token_ggm_ : token_fold_;
     for (char c : s) {
         // ggmorse emits '\n' when it re-acquires on a new pitch: a break, so
         // treat it as a word gap.
@@ -318,10 +325,14 @@ ChannelSnapshot NdbChannel::snapshot(double now_s) const
     s.speed_wpm = key_.keying() ? key_.wpm() : 0.0f;
     s.cost = cost_;
     s.contrast_db = key_.contrast_db();
+    s.window_ms = key_.window_ms();
+    s.periodicity = fold_.periodicity();
+    s.cycle_s = float(fold_.cycle_s());
     s.ggmorse = ggm_ != nullptr;
     s.keying = key_.keying();
     s.text = text_;
     s.text_ggm = text_ggm_;
+    s.text_fold = text_fold_;
     s.pinned = pinned_;
     s.age_s = now_s - created_;
     s.last_seen_s = now_s - last_seen_;

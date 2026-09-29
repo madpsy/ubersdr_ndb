@@ -356,7 +356,8 @@ void NdbDecoder::assign_ggmorse()
         if (ch->ggmorse()) {
             const double held = now_ - ggm_since_[ch->id()];
             const bool done = !s.ident.empty();
-            const bool gave_up = held > cfg_.ggm_hold_s || s.contrast_db < cfg_.ggm_min_contrast_db - 2.0f;
+            const bool faded = s.contrast_db < cfg_.ggm_min_contrast_db - 2.0f && s.periodicity < cfg_.ggm_min_periodicity;
+            const bool gave_up = held > cfg_.ggm_hold_s || faded;
             if (done || gave_up) {
                 ch->set_ggmorse(false);
                 ggm_since_.erase(ch->id());
@@ -366,7 +367,8 @@ void NdbDecoder::assign_ggmorse()
             ++in_use;
             continue;
         }
-        if (!s.ident.empty() || s.age_s < cfg_.ggm_min_age_s || s.contrast_db < cfg_.ggm_min_contrast_db) continue;
+        const bool evidence = s.contrast_db >= cfg_.ggm_min_contrast_db || s.periodicity >= cfg_.ggm_min_periodicity;
+        if (!s.ident.empty() || s.age_s < cfg_.ggm_min_age_s || !evidence) continue;
         auto r = ggm_resting_.find(ch->id());
         if (r != ggm_resting_.end()) {
             if (now_ - r->second < cfg_.ggm_cooldown_s) continue;

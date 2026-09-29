@@ -7,7 +7,9 @@
 //                    ──► FIR ↓4  to  4 kHz        (±1.3 kHz channel)
 //                    ──► |z|  AM envelope, normalised by the carrier level
 //                    ──┬► KeyingDecoder (NDB-specific; the copy shown)  ─┐
-//                      └► ggmorse (general CW decoder; second opinion)   ─┴► ident tally
+//                      │    └► FoldDecoder (the ident averaged over       ─┤
+//                      │        a minute of repeats; weak beacons)          ├► ident tally
+//                      └► ggmorse (general CW decoder; second opinion)   ─┘
 //
 // 4 kHz is ggmorse's internal base rate, so it is fed with no resampling. The
 // AM detector turns an A2A NDB (continuous carrier, ident keyed as a 400 or
@@ -19,6 +21,7 @@
 #pragma once
 
 #include "dsp.h"
+#include "fold_decoder.h"
 #include "keying_decoder.h"
 
 #include <cstdint>
@@ -45,12 +48,16 @@ struct ChannelSnapshot {
     float       speed_wpm = 0.0f;     // ggmorse estimate
     float       cost = 1.0f;          // ggmorse cost of the last decode (lower = better)
     float       contrast_db = 0.0f;   // tone on/off contrast (KeyingDecoder)
+    int         window_ms = 0;        // tone envelope window the copy is decoded with
+    float       periodicity = 0.0f;   // strength of the ident cycle, last minute (FoldDecoder; noise ~0.05)
+    float       cycle_s = 0.0f;       // its length
     bool        ggmorse = false;      // a ggmorse instance is attached right now
     bool        keying = false;       // KeyingDecoder sees on/off keying
     std::string ident;                // most frequent repeated token, or ""
     int         ident_count = 0;      // how many times it was seen
     std::string text;                 // recent copy (KeyingDecoder)
     std::string text_ggm;             // recent copy (ggmorse), for comparison
+    std::string text_fold;            // copies from the repeat-averaged ident (FoldDecoder)
     bool        pinned = false;       // requested on the command line; never dropped
     double      age_s = 0.0;          // since the channel was created
     double      last_seen_s = 0.0;    // since the detector last saw the carrier
@@ -117,7 +124,7 @@ public:
 private:
     void on_audio(float a);
     void run_morse();
-    enum class Source { Keying, Ggmorse };
+    enum class Source { Keying, Ggmorse, Fold };
     void on_text(const std::string &s, double now_s, Source src);
     void end_token(std::string &token, double now_s);
 
@@ -149,11 +156,12 @@ private:
     void tune_ggmorse();
 
     KeyingDecoder key_;
+    FoldDecoder fold_;
 
     // Decoded text and ident tally. Each decoder builds its own tokens; both
     // feed the one tally.
-    std::string text_, text_ggm_;
-    std::string token_key_, token_ggm_;
+    std::string text_, text_ggm_, text_fold_;
+    std::string token_key_, token_ggm_, token_fold_;
     struct Tok { std::string s; double t; };
     std::deque<Tok> tokens_;    // recent candidate ident tokens
 

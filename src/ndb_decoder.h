@@ -73,7 +73,11 @@ struct DecoderConfig {
     enum class Ggmorse { Off, Auto, All };
     Ggmorse ggmorse     = Ggmorse::Auto;
     int    ggm_slots    = 6;        // Auto: instances at once, per stream
-    float  ggm_min_contrast_db = 11.0f;  // some keying evidence (noise ~12, gate 15)
+    // Keying evidence: a clear ident cycle (FoldDecoder), or contrast above
+    // what noise reaches (~12-13, as the best of several lanes and tones) but
+    // short of the keying decoder's 15.
+    float  ggm_min_contrast_db = 13.5f;
+    float  ggm_min_periodicity = 0.2f;
     double ggm_min_age_s = 20.0;    // let the keying decoder measure first
     double ggm_hold_s   = 300.0;    // give up on a channel after this long
     double ggm_cooldown_s = 900.0;  // before the same channel can have one again

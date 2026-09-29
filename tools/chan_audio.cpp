@@ -47,11 +47,15 @@ int main(int argc, char **argv)
         t += n / fs;
         ch.process(x.data(), n, t);
         auto s = ch.snapshot(t);
-        if (s.text.size() != shown) {
-            fprintf(stderr, "%7.1fs pitch %4.0f wpm %4.1f | %s\n", t, s.pitch_hz, s.speed_wpm, s.text.c_str());
-            shown = s.text.size();
+        if (s.text.size() + s.text_fold.size() != shown) {
+            fprintf(stderr, "%7.1fs pitch %4.0f wpm %4.1f win %2d ms %4.1f dB | %s\n", t, s.pitch_hz, s.speed_wpm,
+                    s.window_ms, s.contrast_db, (s.text + " | fold: " + s.text_fold).c_str());
+            shown = s.text.size() + s.text_fold.size();
         }
     }
+    auto s = ch.snapshot(t);
+    fprintf(stderr, "%7.1fs pitch %4.0f wpm %4.1f win %2d ms %4.1f dB | end\n", t, s.pitch_hz, s.speed_wpm,
+            s.window_ms, s.contrast_db);
     wav_header(out, uint32_t(pcm.size()));
     fwrite(pcm.data(), 2, pcm.size(), out);
     fclose(out);

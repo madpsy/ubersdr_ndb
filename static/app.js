@@ -163,8 +163,13 @@ function renderTable() {
     const stale = c.last_seen_s > 30 || !c.ident_fresh;
     // A carrier with no tone keying after a minute is most likely a spur
     // (e.g. a switching-supply comb on whole kHz), or an NDB too weak to read.
-    const unkeyed = !c.ident && !c.keying && c.age_s > 60 && c.contrast_db < 15;
+    // A clear ident cycle is keying too, just too weak to read one repeat at
+    // a time: its copy then comes only from the repeats averaged.
+    const unkeyed = !c.ident && !c.keying && c.age_s > 60 && c.contrast_db < 15 && !(c.periodicity >= 0.2);
+    const fold = c.text_fold ? (c.text_fold.length > 90 ? c.text_fold.slice(-90) : c.text_fold) : '';
+    const hlf = c.ident ? esc(fold).split(esc(c.ident)).join(`<b>${esc(c.ident)}</b>`) : esc(fold);
     const copy = hl ? `<span>${hl}</span>`
+      : hlf ? `<span class="fold" title="Too weak to copy one ident at a time: copied from a minute of repeats averaged (${c.cycle_s.toFixed(1)} s cycle)">${hlf}</span>`
       : unkeyed ? `<span class="nokey" title="Tone on/off contrast ${c.contrast_db.toFixed(0)} dB — no keying found">no keying</span>` : '';
     return `<tr data-id="${c.id}" class="${c.id === state.selected ? 'sel' : ''}${stale || unkeyed ? ' stale' : ''}">
       <td class="freq">${khz(c.freq_hz)}</td>

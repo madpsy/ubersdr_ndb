@@ -27,7 +27,9 @@ NdbChannel (one per beacon)
    rotate carrier to DC → FIR ↓ to 16 kHz → FIR ↓ to 4 kHz (±1.3 kHz)
    → AM envelope ÷ carrier level → 4th-order 250 Hz high-pass
    ├→ KeyingDecoder (NDB-specific: the copy shown)   ─┐
-   └→ ggmorse (general CW decoder: second opinion,   ─┴→ ident tally:
+   │    └→ FoldDecoder (the ident averaged over       ─┤
+   │         a minute of repeats: weak beacons)        ├→ ident tally:
+   └→ ggmorse (general CW decoder: second opinion,   ─┘
         on a small pool of channels at a time)
         most frequent clean 2–4 char token over the last hour
         │
@@ -41,25 +43,31 @@ Browser: static/index.html + app.js  (spectrum · beacons · map · live copy ·
 
 Everything is decided server-side. A browser that connects is sent the full current state straight away (status, spectrum, heard log, and the last few minutes of copy), then live updates: decoded characters as they arrive, status at 1 Hz, spectrum every 2 s.
 
-### Two Morse decoders
+### Three Morse decoders
 
-Most NDBs are A2A: a continuous carrier with the ident keyed as a 400 or 1020 Hz tone. An envelope detector turns that into a keyed audio tone, and two decoders read it.
+Most NDBs are A2A: a continuous carrier with the ident keyed as a 400 or 1020 Hz tone. An envelope detector turns that into a keyed audio tone, and three decoders read it.
 
 **KeyingDecoder** (`src/keying_decoder.*`) is written for how NDBs key: a machine sending the same letters at a fixed speed and level, with a long silence between repetitions. It learns the things that don't change, over a span long enough to include both keying and silence:
 
-- the tone, from a long averaged spectrum;
-- the on/off threshold, from the last 20 s of tone envelope;
+- the tone: of the three strongest lines in a long averaged spectrum, the one that is keyed (a steady beat against a neighbouring carrier can be stronger than the tone itself);
+- the on/off threshold, from the last 20 s of tone envelope: on at 50% of the way from floor to peak, off at 40%;
 - the dit length, from the last 60 marks.
 
 Classification is then textbook. State changes are debounced by ~30% of a dit, so a fade inside a dah doesn't split it. Letters are only emitted while the tone's on/off contrast is at least 15 dB and the timing looks like machine keying (a dit of 50–250 ms, with most marks at exactly one or three dits), so noise produces nothing. Its copy is the one shown and streamed live.
+
+The tone envelope is integrated coherently, and how long for sets the noise bandwidth: 20 ms (~50 Hz) is what a 24 wpm beacon needs, but a 10 wpm one, with a 120 ms dit, can take 60 ms and 3× less noise. So the decoder runs four lanes at once, integrating over 20, 40, 60 and 80 ms, each learning its own threshold and dit. The copy comes from the widest lane whose window is at most 0.6 of its dit, and moves between lanes only between words. Noise's own contrast is the same in every lane (~12 dB), so the one 15 dB gate serves them all.
+
+**FoldDecoder** (`src/fold_decoder.*`) is for beacons too weak to copy one ident at a time. A beacon sends the same ident on a fixed cycle, so each minute of tone envelope is cut at its cycle (found by autocorrelation) and the repeats averaged: 6–15 of them, cutting the noise 2.5–4×. The average is then read like a single ident. A copy is only given out when the cycle is clear and every mark and space in the average fits one or three units of a single speed; noise, folded, produces nothing. Each minute is a separate copy, from audio no other copy saw, and counts in the tally like any other. The UI shows its copies, in italics, when the keying decoder has none.
 
 Decoding is blind: neither decoder is told what to expect. The navaid database is used afterwards, to name and locate what was copied. An ident that matches nothing on its frequency needs 5 copies, rather than 2, before it enters the heard log.
 
 **[ggmorse](https://github.com/ggerganov/ggmorse)** is the library UberSDR's own CW decoder (`cw-decoder`) is built on, vendored from `ka9q_ubersdr/audio_extensions/morse/external/ggmorse` with changes for this use; see [`third_party/ggmorse/README.ubersdr_ndb.md`](third_party/ggmorse/README.ubersdr_ndb.md). It feeds the ident tally as a second opinion. On its own it struggles with NDBs because it re-estimates threshold and speed over a rolling 3 s window, which an NDB's inter-ident silence dominates.
 
-ggmorse costs ~10× the keying decoder, and on strong beacons adds nothing, so it isn't run everywhere. A pool of instances (`NDB_GGMORSE_SLOTS`, default 6 per stream) goes to the channels where a second opinion helps: not yet identified, but showing some tone keying (contrast ≥ 11 dB, including those just under the keying decoder's 15 dB gate). A channel gives its instance back once identified, after 5 minutes without success (then rests 15 minutes so others get a turn), or if the keying evidence fades. Each instance is also handed what the keying decoder has learned: its audio is band-passed ±75 Hz around the known tone, and its pitch and (when known) speed are fixed, so it only has to decide the threshold. The UI marks those channels `2nd`.
+ggmorse costs ~10× the keying decoder, and on strong beacons adds nothing, so it isn't run everywhere. A pool of instances (`NDB_GGMORSE_SLOTS`, default 6 per stream) goes to the channels where a second opinion helps: not yet identified, but showing signs of keying: a clear ident cycle, or tone contrast ≥ 13.5 dB (above noise, but under the keying decoder's 15 dB gate). A channel gives its instance back once identified, after 5 minutes without success (then rests 15 minutes so others get a turn), or if the keying evidence fades. Each instance is also handed what the keying decoder has learned: its audio is band-passed ±75 Hz around the known tone, and its pitch and (when known) speed are fixed, so it only has to decide the threshold. The UI marks those channels `2nd`.
 
-On the test capture, the pool identifies the same beacons as running ggmorse on every channel, including CBL, which the keying decoder alone misses. It does so for 8.5× less CPU.
+On the test capture, the pool identifies the same beacons as running ggmorse on every channel, for 8.5× less CPU.
+
+On a capture at the same site (M9PSY, Dalgety Bay), a 20 ms envelope with its on-level at 60% copied nothing from CBL (380 kHz, 161 km), though it is easy to read by ear: a 10 wpm beacon at ~11 dB of contrast. With the lanes and the lower on-level it copies 23 of 30 repeats in 4 minutes. In 6 minutes of the whole band, the three decoders together identify EDN, PIK, UW, DND, CBL, ATF and GLW, and HB (420 kHz, not in OurAirports; likely Belfast City). Before these changes they identified only the first four.
 
 ### Revisits
 
@@ -218,8 +226,7 @@ A working base. Tested against a live receiver in Scotland: it identified EDN, U
 
 Known gaps, roughly in order of payoff:
 
-- **Fold the keying over the ident period.** An NDB repeats the same ident every few seconds, forever. Averaging the tone envelope over that period integrates a weak beacon up out of the noise, where decoding each repetition on its own never will. This is the big one for weak and DX beacons. 331.0 **GLW** (Glasgow, 70 km) is the test case: its carrier is 30 dB up but its tone sidebands are 16–23 dB below it, and the keying is fragmented on both sidebands and at every envelope bandwidth tried.
-- **Unkeyed carriers.** At the test site, most of the carriers without an ident sit on exact kHz, and each one's strongest "sideband" is its neighbour 1 kHz away. That's an unmodulated spur comb (local RFI), not NDBs. The UI marks a carrier "no keying" after a minute below 15 dB tone contrast. Recognising the comb in the detector would stop it using channels at all.
+- **Unkeyed carriers.** At the test site, most of the carriers without an ident sit on exact kHz, and each one's strongest "sideband" is its neighbour 1 kHz away. That's an unmodulated spur comb (local RFI), not NDBs. The UI marks a carrier "no keying" after a minute below 15 dB tone contrast with no ident cycle. Recognising the comb in the detector would stop it using channels at all.
 - **A1A (keyed-carrier) beacons** demodulate to a keyed DC step that ggmorse can't see. Detect it and switch the channel to a BFO (see the TODO in `ndb_channel.cpp`).
 - **Channel filter.** It's a fixed ±1.3 kHz. Narrowing it to the carrier and the found tone would let beacons closer than 2.5 kHz to a strong one be decoded instead of suppressed.
 - **Unidentified carriers on exact kHz** (344, 352, 361 … kHz) that never copy are probably not all NDBs. A "never copied in N hours" state would tidy the table.

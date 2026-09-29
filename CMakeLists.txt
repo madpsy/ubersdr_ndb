@@ -27,6 +27,7 @@ add_library(ndbcore STATIC
     src/ndb_decoder.cpp
     src/navaids.cpp
     src/keying_decoder.cpp
+    src/fold_decoder.cpp
 )
 target_include_directories(ndbcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(ndbcore PUBLIC ggmorse)

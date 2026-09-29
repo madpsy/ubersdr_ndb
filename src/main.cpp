@@ -453,6 +453,22 @@ struct ChanOut {
     int stream;
 };
 
+// A channel within a kHz or so of a strong beacon can hear that beacon's
+// keying: its ±1.3 kHz passband takes in the neighbour's carrier, and the AM
+// detector turns their beat into a copy of the neighbour's tone. (GLW, 331 kHz,
+// copies this way on a carrier at 329.9.) So an ident that matches nothing on
+// its own frequency, but is exactly the ident of a beacon published within
+// kSpillHz, is that beacon heard through, not another station: never logged
+// or shown as one, even with --show-unlisted.
+constexpr double kSpillHz = 3000.0;
+
+bool is_spill(const App &app, double freq_hz, const std::string &ident)
+{
+    bool exact = false;
+    if (ident.empty() || app.navaids.match(freq_hz, ident, exact).nav) return false;
+    return app.navaids.match(freq_hz, ident, exact, kSpillHz).nav && exact;
+}
+
 std::string status_json(App &app)
 {
     std::string j = "{\"type\":\"status\"";
@@ -509,14 +525,16 @@ std::string status_json(App &app)
         auto m = app.navaids.match(c.freq_hz, c.ident, exact);
         // An ident matching nothing published is withheld unless asked for
         // (see Options::show_unlisted); the carrier and its copy still show.
-        const bool hide_ident = !m.nav && !app.o.show_unlisted;
+        const bool hide_ident = !m.nav && (!app.o.show_unlisted || is_spill(app, c.freq_hz, c.ident));
         j += "{\"id\":" + std::to_string(co.stream * 1000 + c.id) + ",\"stream\":" + std::to_string(co.stream);
         j += ",\"freq_hz\":" + num(c.freq_hz) + ",\"snr_db\":" + num(c.snr_db) + ",\"carrier_db\":" + num(c.carrier_db);
         j += ",\"pitch_hz\":" + num(c.pitch_hz, 0) + ",\"speed_wpm\":" + num(c.speed_wpm, 0) + ",\"cost\":" + num(c.cost, 3);
         j += ",\"ident\":" + q(hide_ident ? "" : c.ident) + ",\"ident_count\":" + std::to_string(hide_ident ? 0 : c.ident_count);
         j += ",\"contrast_db\":" + num(c.contrast_db) + ",\"keying\":" + (c.keying ? "true" : "false");
+        j += ",\"periodicity\":" + num(c.periodicity, 2) + ",\"cycle_s\":" + num(c.cycle_s, 2);
         j += ",\"ggmorse\":" + std::string(c.ggmorse ? "true" : "false");
-        j += ",\"text\":" + q(c.text) + ",\"text_ggm\":" + q(c.text_ggm) + ",\"pinned\":" + (c.pinned ? "true" : "false");
+        j += ",\"text\":" + q(c.text) + ",\"text_ggm\":" + q(c.text_ggm) + ",\"text_fold\":" + q(c.text_fold);
+        j += ",\"pinned\":" + std::string(c.pinned ? "true" : "false");
         j += ",\"age_s\":" + num(c.age_s, 0) + ",\"last_seen_s\":" + num(c.last_seen_s, 0) +
              ",\"last_text_s\":" + num(c.last_text_s, 0);
         j += ",\"tracking\":" + std::string(c.tracking ? "true" : "false") + ",\"visit\":" + (c.visit ? "true" : "false");
@@ -653,6 +671,7 @@ void update_heard(App &app)
         bool exact = false;
         auto m = app.navaids.match(c.freq_hz, c.ident, exact);
         if (c.ident_count < (m.nav ? app.o.dec.visit_copies : kUnmatchedCopies)) continue;
+        if (!m.nav && is_spill(app, c.freq_hz, c.ident)) continue;
         const std::string ident = m.nav ? m.nav->ident : c.ident;
         char key[64];
         snprintf(key, sizeof key, "%s@%.1f", ident.c_str(), (m.nav ? m.nav->freq_hz : c.freq_hz) / 1e3);
@@ -1549,7 +1568,8 @@ void print_summary(App &app)
         for (const auto &c : sp->dec->snapshot()) {
             std::string t = c.text.size() > 40 ? c.text.substr(c.text.size() - 40) : c.text;
             std::string g = c.text_ggm.size() > 24 ? c.text_ggm.substr(c.text_ggm.size() - 24) : c.text_ggm;
-            t += "  | ggm: " + g;
+            std::string f = c.text_fold.size() > 16 ? c.text_fold.substr(c.text_fold.size() - 16) : c.text_fold;
+            t += "  | ggm: " + g + " | fold: " + f;
             bool exact = false;
             auto m = app.navaids.match(c.freq_hz, c.ident, exact);
             std::string nav = "-";
