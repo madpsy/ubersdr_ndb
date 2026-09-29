@@ -1373,7 +1373,15 @@ void run_client(App &app, Stream &st)
         st.status_msg = m;
     };
 
-    int backoff = 5;
+    // Backoff 5 s doubling to 60 s, with ±20% jitter so streams (and other
+    // addons) don't all come back in step after an UberSDR restart. It only
+    // resets after a session that actually streamed for a while: one that
+    // is accepted and then fails at once backs off like any other failure.
+    constexpr int kBackoffMin = 5, kBackoffMax = 60;
+    constexpr int kHealthyS = 60;       // streamed this long: a good session
+    constexpr int kStallS = 20;         // no IQ for this long: reconnect
+    int backoff = kBackoffMin;
+    std::mt19937 rng(std::random_device{}());
     while (g_running) {
         fetch_receiver(app);
         const std::string session = make_uuid4();
@@ -1385,7 +1393,7 @@ void run_client(App &app, Stream &st)
         if (code < 0) {
             fprintf(stderr, "[s%d] cannot reach %s/connection\n", st.index, o.url.c_str());
             set_msg("cannot reach UberSDR");
-        } else if (resp.find("\"allowed\":true") == std::string::npos) {
+        } else if (json_scalar_after(resp, "", "allowed") != "true") {
             fprintf(stderr, "[s%d] connection refused (HTTP %ld): %s\n", st.index, code, resp.c_str());
             set_msg("UberSDR refused the connection");
         } else {
@@ -1393,12 +1401,16 @@ void run_client(App &app, Stream &st)
                 fprintf(stderr, "[s%d] warning: allowed_iq_modes does not list %s — %s\n", st.index,
                         st.spec.mode.c_str(),
                         o.password.empty() ? "a bypass password is probably needed" : "check the password");
-            backoff = 5;
-
             IqSink sink{app, st, dump};
             ubersdr::PCMv4StreamDecoder v4;
             std::atomic<bool> done{false};
             unsigned long decode_errors = 0;
+            // Stream-thread clock of the last IQ frame, for the stall check.
+            const auto t_start = std::chrono::steady_clock::now();
+            auto secs = [&] {
+                return std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
+            };
+            std::atomic<double> last_frame{0.0}, opened_at{-1.0};
 
             ix::WebSocket ws;
             ws.setUrl(ws_url(o, st.spec, session));
@@ -1415,6 +1427,8 @@ void run_client(App &app, Stream &st)
                     fprintf(stderr, "[s%d] connected: %.0f Hz %s\n", st.index, st.spec.center_hz, st.spec.mode.c_str());
                     st.connected = true;
                     set_msg("connected");
+                    opened_at = secs();
+                    last_frame = secs();
                     break;
                 case ix::WebSocketMessageType::Close:
                     fprintf(stderr, "[s%d] websocket closed: %s\n", st.index, m->closeInfo.reason.c_str());
@@ -1430,6 +1444,7 @@ void run_client(App &app, Stream &st)
                             fprintf(stderr, "[s%d] server: %s\n", st.index, m->str.c_str());
                         break;
                     }
+                    last_frame = secs();
                     // Every frame must reach the v4 decoder, even one we then
                     // drop: its predictor is backward adaptive.
                     const auto *p = reinterpret_cast<const uint8_t *>(m->str.data());
@@ -1467,16 +1482,24 @@ void run_client(App &app, Stream &st)
                     ping = 0;
                     ws.sendText("{\"type\":\"ping\"}");
                 }
+                // Open but silent (a half-open TCP connection, or a server that
+                // stopped sending without closing): nothing else would notice.
+                if (opened_at >= 0 && secs() - last_frame > kStallS) {
+                    fprintf(stderr, "[s%d] no IQ for %ds, reconnecting\n", st.index, kStallS);
+                    break;
+                }
             }
             ws.stop();
             st.connected = false;
             if (sink.failed) break;  // unusable sample rate: retrying won't help
+            if (opened_at >= 0 && secs() - opened_at >= kHealthyS) backoff = kBackoffMin;
             set_msg("reconnecting");
         }
         if (!g_running) break;
-        fprintf(stderr, "[s%d] reconnecting in %ds\n", st.index, backoff);
-        for (int i = 0; i < backoff * 10 && g_running; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        backoff = std::min(backoff * 2, 60);
+        const int wait_ds = int(backoff * 10 * std::uniform_real_distribution<double>(0.8, 1.2)(rng));
+        fprintf(stderr, "[s%d] reconnecting in %.1fs\n", st.index, wait_ds / 10.0);
+        for (int i = 0; i < wait_ds && g_running; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        backoff = std::min(backoff * 2, kBackoffMax);
     }
     if (dump) fclose(dump);
 }
