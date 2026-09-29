@@ -343,6 +343,10 @@ struct App {
     int64_t hist_minute = 0;                    // last minute sampled
     int64_t hist_flushed = 0;                   // buckets up to this start are on disk
     int64_t hist_compacted = 0;                 // history.tsv last rewritten
+    // A bucket still open at startup (restarted within it) is on disk only
+    // as far as the last run got: that part, so its close appends the rest.
+    int64_t hist_base_t = -1;
+    HistBucket hist_base;
 };
 
 int64_t now_ms()
@@ -838,15 +842,29 @@ void load_heard(App &app)
 // receiver's. Appended as each bucket closes, and on exit for the one still
 // open. Lines for the same bucket and key add up, so a bucket split across a
 // restart reads back whole.
+void write_bucket(FILE *f, int64_t t, const HistBucket &b, const HistBucket *minus = nullptr)
+{
+    fprintf(f, "%lld\t*\t%d\t0\t0\n", (long long)t, b.up_min - (minus ? minus->up_min : 0));
+    for (const auto &[key, a] : b.beacons) {
+        int m = a.minutes;
+        float sum = a.snr_sum;
+        if (minus) {
+            auto it = minus->beacons.find(key);
+            if (it != minus->beacons.end()) { m -= it->second.minutes; sum -= it->second.snr_sum; }
+        }
+        if (m > 0) fprintf(f, "%lld\t%s\t%d\t%.1f\t%.1f\n", (long long)t, key.c_str(), m, sum, a.snr_max);
+    }
+}
+
 void append_history(App &app, int64_t t, const HistBucket &b)
 {
     if (app.o.data_dir.empty()) return;
     FILE *f = fopen((app.o.data_dir + "/history.tsv").c_str(), "a");
     if (!f) return;
-    fprintf(f, "%lld\t*\t%d\t0\t0\n", (long long)t, b.up_min);
-    for (const auto &[key, a] : b.beacons)
-        fprintf(f, "%lld\t%s\t%d\t%.1f\t%.1f\n", (long long)t, key.c_str(), a.minutes, a.snr_sum, a.snr_max);
+    const bool split = t == app.hist_base_t;
+    write_bucket(f, t, b, split ? &app.hist_base : nullptr);
     fclose(f);
+    if (split) app.hist_base_t = -1;
 }
 
 // Rewrite history.tsv from memory, which holds only the last kHistKeepS:
@@ -859,10 +877,11 @@ void compact_history(App &app)
     FILE *f = fopen(tmp.c_str(), "w");
     if (!f) { fprintf(stderr, "warning: cannot write %s\n", tmp.c_str()); return; }
     for (const auto &[t, b] : app.history) {
-        if (t > app.hist_flushed) break;   // not closed yet: appended when it is
-        fprintf(f, "%lld\t*\t%d\t0\t0\n", (long long)t, b.up_min);
-        for (const auto &[key, a] : b.beacons)
-            fprintf(f, "%lld\t%s\t%d\t%.1f\t%.1f\n", (long long)t, key.c_str(), a.minutes, a.snr_sum, a.snr_max);
+        // Not closed yet: appended when it is. Of one the last run left
+        // open, keep what that run wrote.
+        if (t == app.hist_base_t) write_bucket(f, t, app.hist_base);
+        if (t > app.hist_flushed) break;
+        write_bucket(f, t, b);
     }
     fclose(f);
     rename(tmp.c_str(), path.c_str());
@@ -894,7 +913,17 @@ void load_history(App &app)
         a.snr_max = std::max(a.snr_max, mx);
     }
     in.close();
-    if (!app.history.empty()) app.hist_flushed = app.history.rbegin()->first;
+    if (!app.history.empty()) {
+        app.hist_flushed = app.history.rbegin()->first;
+        // Restarted within the last run's final bucket: it stays open.
+        const int64_t now = now_ms() / 1000;
+        if (app.hist_flushed == now - now % kHistBucketS) {
+            app.hist_base_t = app.hist_flushed;
+            app.hist_base = app.history.rbegin()->second;
+            app.hist_flushed -= kHistBucketS;
+            app.hist_minute = now / 60;   // the last run may have counted this minute
+        }
+    }
     compact_history(app);
     if (!app.history.empty()) {
         fprintf(stderr, "history: %zu buckets from %s\n", app.history.size(), path.c_str());

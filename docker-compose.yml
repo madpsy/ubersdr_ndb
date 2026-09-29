@@ -41,7 +41,7 @@ services:
       # published beacon inside it (a shared ident on the far side of the
       # world is far more likely a misread), and the map shows unheard
       # beacons out to it. 0 = no limit.
-      NDB_RADIUS_KM: "2000"
+      NDB_RADIUS_KM: "1000"
       # 0 (default): only the known list. Only carriers with a published
       # beacon (within the radius) near their frequency are decoded, and only
       # idents matching one are shown. 1: decode every carrier and show
