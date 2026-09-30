@@ -65,7 +65,7 @@ else()
     set(IXWS_LIBS ixwebsocket_bundled)
 endif()
 
-add_executable(ubersdr_ndb src/main.cpp)
+add_executable(ubersdr_ndb src/main.cpp src/mqtt.cpp)
 target_include_directories(ubersdr_ndb PRIVATE ${CURL_INCLUDE_DIRS})
 target_link_libraries(ubersdr_ndb PRIVATE ndbcore ${IXWS_LIBS} ${CURL_LIBRARIES} Threads::Threads m)
 target_compile_options(ubersdr_ndb PRIVATE -Wall -Wextra)

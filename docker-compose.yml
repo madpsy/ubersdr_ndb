@@ -57,6 +57,11 @@ services:
       # NDB_GGMORSE: "auto"
       # NDB_GGMORSE_SLOTS: "6"   # per stream
       # WEB_PORT: "6100"
+      # MQTT and Home Assistant, through the receiver's own MQTT connection
+      # (UberSDR's addon ingest port): no broker or credentials to set.
+      # Dormant if MQTT is off on the receiver. "0" turns it off.
+      NDB_MQTT: "1"
+      # UBERSDR_INGEST_URL: "http://ubersdr:6926"   # only if the operator moved the port
     volumes:
       # Heard log (heard.tsv): every beacon ever identified, kept across restarts
       - ./data:/data

@@ -140,6 +140,8 @@ Edit `~/ubersdr/ndb/docker-compose.yml`, then `./restart.sh`.
 | `RECEIVER_LAT` / `RECEIVER_LON` | from UberSDR | Override the receiver position |
 | `MIN_MARGIN` | `26` | Reduced-depth IQ margin in dB (0 = lossless) |
 | `NDB_LOG_SUMMARY` | off | Log the full beacon table every N seconds (debugging) |
+| `NDB_MQTT` | `1` | `0` turns [MQTT](#mqtt-and-home-assistant) off |
+| `UBERSDR_INGEST_URL` | `http://<UBERSDR_URL host>:6926` | UberSDR's addon MQTT ingest port, only if the operator moved it |
 | `WEB_PORT` | `6100` | |
 
 ### Streams
@@ -182,6 +184,29 @@ History is sampled once a minute into 15-minute buckets and kept 30 days in `DAT
 | `GET /api/decodes` | recent live copy |
 | `GET /api/navaids?max_km=…` | published NDBs in the covered band (default radius `NDB_RADIUS_KM`) |
 | `GET /api/search?q=…` | search the whole navaid list by ident, name or frequency, with live / heard / in-band status |
+
+---
+
+## MQTT and Home Assistant
+
+Running beside an UberSDR receiver with MQTT enabled, this publishes through the receiver's own MQTT connection, and shows up in Home Assistant as a device nested under the receiver. **There is nothing to configure.** It uses UberSDR's addon ingest port, as the receiver's other addons do (see `addon_mqtt.md` in [ka9q_ubersdr](https://github.com/madpsy/ka9q_ubersdr)). The port knows who is calling from the connection itself, so there is no broker address, credential or topic to set. Where there is no port to reach (MQTT off on the receiver), or it does not recognise this container as an installed addon, it logs that once, stays dormant, and asks again every 30 s. `NDB_MQTT=0` turns it off.
+
+Only identified beacons are published, from the heard log. The live Morse copy never goes to MQTT.
+
+| Topic (under `ubersdr/metrics/addons/ndb/`) | Retained | |
+|---|---|---|
+| `summary` | yes | Every 30 s, and within seconds of an event: streams, carriers decoding / waiting / tracked, counts heard now / last hour / last 24 h / new in 24 h / logged, the beacons heard now (strongest first, up to 50), the strongest, the farthest now and in 24 h, the last identified and the last new beacon |
+| `events` | no | `new`: a beacon identified for the first time. `returned`: one heard again after an hour or more unheard while its stream was up (time the receiver or this addon was down doesn't count, so a restart doesn't set it off), with `absent_s`, the whole gap. Each event is sent once and in order, and waits out the receiver's rate limit instead of being dropped. |
+| `status` | yes | `online` / `offline`, maintained by UberSDR |
+
+A beacon, in the summary and in events:
+
+```json
+{"ident": "CBL", "name": "Campbeltown", "country": "GB", "confirmed": true, "freq_khz": 380.0,
+ "dist_km": 161, "bearing_deg": 246, "lat": 55.4356, "lon": -5.6881, "snr_db": 26.9}
+```
+
+When the receiver has Home Assistant discovery on, these are declared, all reading the one retained summary: **Receiving** (connectivity, with the streams as attributes), **Beacons Heard Now** (the list as attributes), **Beacons Heard (1 h)**, **(24 h)**, **New Beacons (24 h)**, **Beacons Logged**, **Strongest Beacon** and **Strongest SNR**, **Farthest Beacon Now** and **(24 h)** (km, the beacon as attributes), **Last Identified**, **Last New Beacon**, **Carriers Decoding**, **Beacons Tracked**, and, as diagnostics, **Streams Connected**, **Beacon Database** and **Started**. A figure with nothing to show (nothing heard yet, or the receiver position unknown) stays `unknown` rather than reading zero.
 
 ---
 

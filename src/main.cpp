@@ -12,6 +12,7 @@
 //
 // Run with --help for the full option list.
 
+#include "mqtt.h"
 #include "navaids.h"
 #include "ndb_decoder.h"
 #include "pcm_v4.hpp"
@@ -47,7 +48,8 @@ namespace {
 
 constexpr int kDefaultWebPort = 6100;
 constexpr int kSpectrumPoints = 2048;
-const char   *kUserAgent      = "ubersdr_ndb/0.1";
+#define NDB_VERSION "0.1"
+const char   *kUserAgent      = "ubersdr_ndb/" NDB_VERSION;
 
 // Reduced-depth IQ margin, as the other addons use it (see ubersdr_loran
 // main.go): 26 dB below the band's own noise floor is transparent and roughly
@@ -85,6 +87,8 @@ struct Options {
     bool        show_unlisted = false;
     std::string data_dir;            // heard log persisted here ("" = memory only)
     int         summary_every = 0;   // seconds between beacon-table dumps to the log (0 = never)
+    bool        mqtt = true;         // publish through UberSDR's addon ingest port (see mqtt.h)
+    std::string mqtt_ingest;         // "" = UBERSDR_INGEST_URL, else port 6926 on --url's host
     std::string dump_iq;        // write received IQ (int16 interleaved) here (first stream)
     std::string iq_file;        // offline: read IQ from here instead
     double      file_rate = 0.0;
@@ -140,6 +144,11 @@ void usage(const char *argv0)
         "  --data-dir DIR     keep the heard log in DIR/heard.tsv across restarts\n"
         "  --summary-every S  log the full beacon table every S seconds (default: 0 = off;\n"
         "                     --iq-file runs always print one at the end)\n"
+        "\n"
+        "MQTT (through UberSDR's addon ingest port; dormant where there is none):\n"
+        "  --no-mqtt          do not publish\n"
+        "  --mqtt-ingest URL  the ingest port (default: $UBERSDR_INGEST_URL, else\n"
+        "                     http://<--url host>:6926)\n"
         "\n"
         "Web:\n"
         "  --web-port N       web UI port (default: %d, 0 = disabled)\n"
@@ -229,6 +238,8 @@ bool parse_args(int argc, char **argv, Options &o)
         else if (a == "--show-unlisted") o.show_unlisted = true;
         else if (a == "--data-dir")     o.data_dir = next("--data-dir");
         else if (a == "--summary-every") o.summary_every = atoi(next("--summary-every").c_str());
+        else if (a == "--no-mqtt")      o.mqtt = false;
+        else if (a == "--mqtt-ingest")  o.mqtt_ingest = next("--mqtt-ingest");
         else if (a == "--web-port")     o.web_port = atoi(next("--web-port").c_str());
         else if (a == "--web-static")   o.web_static = next("--web-static");
         else { fprintf(stderr, "error: unknown option %s\n", a.c_str()); return false; }
@@ -272,6 +283,7 @@ struct Stream {
     std::unique_ptr<ndb::NdbDecoder> dec;
     std::atomic<bool> connected{false};
     std::string status_msg = "starting";
+    int64_t up_since_s = 0;        // connected without a break since (wall clock); update_heard()'s alone
 };
 
 struct Receiver {
@@ -347,6 +359,9 @@ struct App {
     // as far as the last run got: that part, so its close appends the rest.
     int64_t hist_base_t = -1;
     HistBucket hist_base;
+
+    int64_t started_s = 0;                      // wall clock
+    ndb::MqttPublisher *mqtt = nullptr;         // null when not publishing
 };
 
 int64_t now_ms()
@@ -644,6 +659,41 @@ bool ident_final(bool matched, bool exact, int copies, int exact_copies)
     return matched && exact ? copies >= exact_copies : copies >= kUnmatchedCopies;
 }
 
+// Whether a heard-log entry is shown: as the UI has it, unlisted idents only
+// with --show-unlisted, and nothing matched outside the radius.
+bool heard_visible(const App &app, const HeardEntry &e)
+{
+    if (!e.confirmed && !app.o.show_unlisted) return false;
+    return !(e.confirmed && app.o.map_km > 0 && e.dist_km > app.o.map_km);
+}
+
+std::string iso_utc(int64_t t)
+{
+    time_t tt = time_t(t);
+    struct tm tm;
+    gmtime_r(&tt, &tm);
+    char b[32];
+    strftime(b, sizeof b, "%Y-%m-%dT%H:%M:%SZ", &tm);
+    return b;
+}
+
+// A heard-log entry for MQTT: the identification and where it is, never the
+// copy it came from. `extra` is appended inside the object (",\"k\":v...").
+std::string beacon_mqtt_json(const HeardEntry &e, const std::string &extra = "")
+{
+    std::string j = "{\"ident\":" + q(e.ident) + ",\"name\":" + q(e.name) + ",\"country\":" + q(e.country) +
+                    ",\"confirmed\":" + (e.confirmed ? "true" : "false") + ",\"freq_khz\":" + num(e.freq_hz / 1e3, 2);
+    j += ",\"dist_km\":" + (e.dist_km >= 0 ? num(e.dist_km, 0) : "null") +
+         ",\"bearing_deg\":" + (e.bearing_deg >= 0 ? num(e.bearing_deg, 0) : "null");
+    if (e.confirmed) j += ",\"lat\":" + num(e.lat, 4) + ",\"lon\":" + num(e.lon, 4);
+    return j + extra + "}";
+}
+
+// A beacon unheard this long while its stream was up, and then heard, counts
+// as back (an MQTT event). Time the stream or this addon was down does not
+// count: a receiver restart is not every beacon going away.
+constexpr int64_t kReturnGapS = 3600;
+
 // Fold the current identifications into the heard log. Called once a second.
 void update_heard(App &app)
 {
@@ -651,23 +701,32 @@ void update_heard(App &app)
     // counts as heard while its carrier is there and its last copy is
     // recent (ident_fresh). So last_s follows the carrier, and last_ident_s
     // the copies themselves.
+    const int64_t now = now_ms() / 1000;
     std::vector<ndb::ChannelSnapshot> snaps;
+    std::vector<int64_t> snap_up;      // each snapshot's stream's up_since_s
     for (auto &sp : app.streams) {
+        // Nothing is heard on a stream that is down. Its decoder's clock stops
+        // with the IQ, so its tracked beacons would otherwise still look fresh.
+        if (!sp->connected || sp->up_since_s == 0) sp->up_since_s = now;
+        if (!sp->connected) continue;
         std::lock_guard<std::mutex> lk(sp->mu);
         if (!sp->dec) continue;
         for (auto &c : sp->dec->snapshot())
-            if (!c.ident.empty() && c.last_seen_s < 60 && c.ident_fresh) snaps.push_back(std::move(c));
+            if (!c.ident.empty() && c.last_seen_s < 60 && c.ident_fresh) {
+                snaps.push_back(std::move(c));
+                snap_up.push_back(sp->up_since_s);
+            }
     }
     if (snaps.empty()) {
         std::lock_guard<std::mutex> hlk(app.heard_mu);
         app.heard_now.clear();
         return;
     }
-    const int64_t now = now_ms() / 1000;
     std::lock_guard<std::mutex> nlk(app.navaids_mu);
     std::lock_guard<std::mutex> hlk(app.heard_mu);
     app.heard_now.clear();
-    for (const auto &c : snaps) {
+    for (size_t i = 0; i < snaps.size(); ++i) {
+        const auto &c = snaps[i];
         bool exact = false;
         auto m = app.navaids.match(c.freq_hz, c.ident, exact);
         if (c.ident_count < (m.nav ? app.o.dec.visit_copies : kUnmatchedCopies)) continue;
@@ -678,6 +737,9 @@ void update_heard(App &app)
         auto &hn = app.heard_now[key];
         hn = std::max(hn, c.snr_db);
         auto &e = app.heard[key];
+        const bool is_new = e.first_s == 0;
+        const int64_t absent_s = is_new ? 0 : now - e.last_s;
+        const int64_t unheard_s = is_new ? 0 : now - std::max(e.last_s, snap_up[i]);
         if (e.first_s == 0) {
             e.first_s = now;
             if (m.nav || app.o.show_unlisted)
@@ -700,6 +762,12 @@ void update_heard(App &app)
         e.best_snr_db = std::max(e.best_snr_db, c.snr_db);
         e.best_copies = std::max(e.best_copies, c.ident_count);
         app.heard_dirty = true;
+        if (app.mqtt && heard_visible(app, e) && (is_new || unheard_s >= kReturnGapS)) {
+            std::string extra = ",\"type\":" + q(is_new ? "new" : "returned") + ",\"time_utc\":" + q(iso_utc(now)) +
+                                ",\"snr_db\":" + num(c.snr_db);
+            if (!is_new) extra += ",\"absent_s\":" + std::to_string(absent_s);
+            app.mqtt->event(beacon_mqtt_json(e, extra));   // takes only the publisher's own lock
+        }
     }
     // Bounded, so months of running can't grow it (or heard.tsv) without
     // limit: past the cap, forget whatever was heard longest ago.
@@ -794,6 +862,94 @@ std::string beacons_json(App &app, long max_age_s)
              ",\"snr_db\":" + (lv != live_snr.end() ? num(lv->second) : "null") + "}";
     }
     return j + "]}";
+}
+
+// The MQTT summary (see mqtt.h): the receiver's state, and what is heard, from
+// the heard log. Identified beacons only; the live copy is never published.
+std::string mqtt_summary_json(App &app)
+{
+    constexpr size_t kHeardNowMax = 50;   // keeps the Home Assistant attribute small
+    const int64_t now = now_ms() / 1000;
+
+    std::string j = "{\"time_utc\":" + q(iso_utc(now)) + ",\"started_utc\":" + q(iso_utc(app.started_s)) +
+                    ",\"version\":" + q(NDB_VERSION);
+    {
+        std::lock_guard<std::mutex> lk(app.rx.mu);
+        j += ",\"receiver\":{\"callsign\":" + q(app.rx.callsign) + ",\"name\":" + q(app.rx.name) +
+             ",\"location\":" + q(app.rx.location) + "}";
+    }
+
+    int connected = 0, decoding = 0, waiting = 0, tracking = 0;
+    j += ",\"streams\":[";
+    for (size_t i = 0; i < app.streams.size(); ++i) {
+        Stream &st = *app.streams[i];
+        std::lock_guard<std::mutex> lk(st.mu);
+        connected += st.connected;
+        if (st.dec && st.connected) {   // a stream that is down decodes nothing
+            for (const auto &c : st.dec->snapshot()) decoding += !c.tracking;
+            waiting += int(st.dec->waiting());
+            tracking += int(st.dec->tracking());
+        }
+        j += std::string(i ? "," : "") + "{\"center_khz\":" + num(st.spec.center_hz / 1e3, 1) + ",\"mode\":" +
+             q(st.spec.mode) + ",\"connected\":" + (st.connected ? "true" : "false") + ",\"message\":" +
+             q(st.status_msg) + "}";
+    }
+    j += "],\"streams_connected\":" + std::to_string(connected) + ",\"receiving\":" + (connected ? "true" : "false");
+    j += ",\"carriers\":{\"decoding\":" + std::to_string(decoding) + ",\"waiting\":" + std::to_string(waiting) +
+         ",\"tracking\":" + std::to_string(tracking) + "}";
+
+    std::lock_guard<std::mutex> hlk(app.heard_mu);
+    int n_hour = 0, n_day = 0, n_new_day = 0, n_logged = 0;
+    const HeardEntry *far_day = nullptr, *last_id = nullptr, *last_new = nullptr;
+    for (const auto &[key, e] : app.heard) {
+        if (!heard_visible(app, e)) continue;
+        ++n_logged;
+        n_hour += now - e.last_s <= 3600;
+        n_new_day += now - e.first_s <= 86400;
+        if (now - e.last_s <= 86400) {
+            ++n_day;
+            if (e.dist_km >= 0 && (!far_day || e.dist_km > far_day->dist_km)) far_day = &e;
+        }
+        if (!last_id || e.last_ident_s > last_id->last_ident_s) last_id = &e;
+        if (!last_new || e.first_s > last_new->first_s) last_new = &e;
+    }
+
+    // Heard now, strongest first.
+    std::vector<std::pair<float, const HeardEntry *>> now_list;
+    for (const auto &[key, snr] : app.heard_now) {
+        auto it = app.heard.find(key);
+        if (it != app.heard.end() && heard_visible(app, it->second)) now_list.push_back({snr, &it->second});
+    }
+    std::sort(now_list.begin(), now_list.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+    const std::pair<float, const HeardEntry *> *far_now = nullptr;
+    for (const auto &p : now_list)
+        if (p.second->dist_km >= 0 && (!far_now || p.second->dist_km > far_now->second->dist_km)) far_now = &p;
+
+    j += ",\"counts\":{\"now\":" + std::to_string(now_list.size()) + ",\"hour\":" + std::to_string(n_hour) +
+         ",\"day\":" + std::to_string(n_day) + ",\"new_day\":" + std::to_string(n_new_day) +
+         ",\"logged\":" + std::to_string(n_logged) + "}";
+    j += ",\"heard_now\":[";
+    for (size_t i = 0; i < now_list.size() && i < kHeardNowMax; ++i)
+        j += (i ? "," : "") + beacon_mqtt_json(*now_list[i].second, ",\"snr_db\":" + num(now_list[i].first));
+    j += "]";
+    j += ",\"strongest\":" +
+         (now_list.empty() ? std::string("null")
+                           : beacon_mqtt_json(*now_list[0].second, ",\"snr_db\":" + num(now_list[0].first)));
+    j += ",\"farthest_now\":" +
+         (far_now ? beacon_mqtt_json(*far_now->second, ",\"snr_db\":" + num(far_now->first)) : std::string("null"));
+    j += ",\"farthest_day\":" +
+         (far_day ? beacon_mqtt_json(*far_day, ",\"last_heard_utc\":" + q(iso_utc(far_day->last_s)) +
+                                                   ",\"best_snr_db\":" + num(far_day->best_snr_db))
+                  : std::string("null"));
+    j += ",\"last_identified\":" +
+         (last_id ? beacon_mqtt_json(*last_id, ",\"time_utc\":" + q(iso_utc(last_id->last_ident_s)))
+                  : std::string("null"));
+    j += ",\"last_new\":" +
+         (last_new ? beacon_mqtt_json(*last_new, ",\"first_heard_utc\":" + q(iso_utc(last_new->first_s)) +
+                                                     ",\"best_snr_db\":" + num(last_new->best_snr_db))
+                   : std::string("null"));
+    j += ",\"navaids_loaded\":" + std::to_string(app.navaids.size());
+    return j + "}";
 }
 
 // heard.tsv: one entry per line, tab-separated, in HeardEntry field order.
@@ -1831,6 +1987,22 @@ int main(int argc, char **argv)
         if (!placed) fprintf(stderr, "warning: --ndb %.0f is outside every stream — ignored\n", f);
     }
 
+    app.started_s = now_ms() / 1000;
+
+    // MQTT through the receiver's addon ingest port: on by default, and
+    // dormant, saying so once, wherever there is no such port (see mqtt.h).
+    std::unique_ptr<ndb::MqttPublisher> mqtt;
+    // Not for an --iq-file run unless an ingest port is named (for testing).
+    if (o.mqtt && (o.iq_file.empty() || !o.mqtt_ingest.empty())) {
+        ndb::MqttConfig mc;
+        mc.ingest_url = o.mqtt_ingest.empty() ? ndb::MqttPublisher::ingest_url_for(o.url) : o.mqtt_ingest;
+        while (!mc.ingest_url.empty() && mc.ingest_url.back() == '/') mc.ingest_url.pop_back();
+        mc.version = NDB_VERSION;
+        mqtt = std::make_unique<ndb::MqttPublisher>(mc, [&app] { return mqtt_summary_json(app); });
+        app.mqtt = mqtt.get();
+        mqtt->start();
+    }
+
     std::unique_ptr<ix::HttpServer> web;
     if (o.web_port > 0) {
         web = start_web(app);
@@ -1891,6 +2063,8 @@ int main(int argc, char **argv)
     }
 
     if (pusher.joinable()) pusher.join();
+    if (mqtt) mqtt->stop();
+    app.mqtt = nullptr;
     update_heard(app);
     save_heard(app);
     history_sample(app, true);

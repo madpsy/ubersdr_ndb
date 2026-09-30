@@ -30,6 +30,9 @@
 #   WEB_STATIC         Web UI files (default: /usr/local/share/ubersdr_ndb/static)
 #   NAVAIDS            OurAirports navaids.csv (default: /usr/local/share/ubersdr_ndb/navaids.csv)
 #   NDB_LOG_SUMMARY    Log the full beacon table every N seconds (default: off)
+#   NDB_MQTT           0 = don't publish to MQTT through UberSDR (default: 1)
+#   UBERSDR_INGEST_URL UberSDR's addon MQTT ingest port (default: port 6926 on
+#                      UBERSDR_URL's host); read by the daemon itself
 
 set -e
 
@@ -58,5 +61,6 @@ case "$NDB_SHOW_UNLISTED" in 1|true|yes) set -- "$@" --show-unlisted ;; esac
 [ -n "$RECEIVER_LON" ]     && set -- "$@" --lon "$RECEIVER_LON"
 [ -n "$MIN_MARGIN" ]       && set -- "$@" --min-margin "$MIN_MARGIN"
 [ -n "$NDB_LOG_SUMMARY" ]  && set -- "$@" --summary-every "$NDB_LOG_SUMMARY"
+case "$NDB_MQTT" in 0|false|no|off) set -- "$@" --no-mqtt ;; esac
 
 exec /usr/local/bin/ubersdr_ndb "$@"
