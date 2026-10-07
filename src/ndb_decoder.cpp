@@ -181,9 +181,9 @@ void NdbDecoder::on_detection()
     }
 
     // Promote candidates seen on enough consecutive passes, strongest first.
-    // A free slot takes anyone; a full house recycles a channel that has had
-    // its trial and shown no keying, but not for a carrier that was itself
-    // recycled recently (so the queue rotates rather than thrashing).
+    // A full house recycles a channel that has had its trial and shown no
+    // keying. A carrier that was itself recycled recently waits out its
+    // cooldown either way, so the queue rotates rather than thrashing.
     pending_.erase(std::remove_if(pending_.begin(), pending_.end(), [](const Pending &p) { return !p.hit_this_pass; }),
                    pending_.end());
     std::sort(pending_.begin(), pending_.end(), [](const Pending &a, const Pending &b) { return a.snr_db > b.snr_db; });
@@ -199,8 +199,10 @@ void NdbDecoder::on_detection()
 
     for (auto it = pending_.begin(); it != pending_.end();) {
         if (it->hits < cfg_.confirm_passes) { ++it; continue; }
+        // Free slot or not: revisits free one every few minutes, and the
+        // strongest unkeyed carrier would otherwise take each of them.
+        if (recently_recycled(it->offset_hz)) { ++it; continue; }
         if (int(channels_.size()) >= cfg_.max_channels) {
-            if (recently_recycled(it->offset_hz)) { ++it; continue; }
             NdbChannel *victim = recyclable();
             if (!victim) break;
             fprintf(stderr, "ndb: ~ ch%d %.1f Hz recycled (no keying)\n", victim->id(), center_hz_ + victim->offset_hz());

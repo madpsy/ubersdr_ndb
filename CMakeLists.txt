@@ -95,3 +95,10 @@ target_link_libraries(chan_audio PRIVATE ndbcore)
 # Debug tool: chosen beacons' copies from a raw IQ file, scored (not built by default).
 add_executable(chan_eval EXCLUDE_FROM_ALL tools/chan_eval.cpp)
 target_link_libraries(chan_eval PRIVATE ndbcore)
+
+# Test: a recycled carrier waits out its cooldown even for a free slot.
+# ctest --test-dir build (not built by default: cmake --build build --target slot_rotation_test)
+enable_testing()
+add_executable(slot_rotation_test EXCLUDE_FROM_ALL tools/slot_rotation_test.cpp)
+target_link_libraries(slot_rotation_test PRIVATE ndbcore)
+add_test(NAME slot_rotation COMMAND slot_rotation_test)
