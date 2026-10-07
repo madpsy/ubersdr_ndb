@@ -8,15 +8,17 @@ namespace ndb {
 
 std::string NdbDecoder::check_sample_rate(double fs)
 {
-    // Each channel decimates to 16 kHz and then 4 kHz by integer factors.
-    if (fs < 16000.0 || std::fmod(fs, 16000.0) != 0.0)
+    // The channelizer's subbands come out at 3 kHz x 4 (see channelizer.h),
+    // and each channel decimates its subband to 4 kHz by an integer factor.
+    const double out = fs >= 12000.0 ? Channelizer::out_rate_for(fs) : 0.0;
+    if (out <= 0.0 || std::fmod(out, kAudioRate) != 0.0)
         return "sample rate " + std::to_string(int(fs)) +
-               " Hz is not a multiple of 16 kHz; use iq48, iq96, iq192 or iq384";
+               " Hz does not split into 3 kHz subbands; use iq48, iq96, iq192 or iq384";
     return "";
 }
 
 NdbDecoder::NdbDecoder(double center_hz, double sample_rate, DecoderConfig cfg)
-    : center_hz_(center_hz), fs_(sample_rate), cfg_(std::move(cfg)), det_(sample_rate, cfg_.detector)
+    : center_hz_(center_hz), fs_(sample_rate), cfg_(std::move(cfg)), det_(sample_rate, cfg_.detector), bank_(sample_rate)
 {
     for (double f : cfg_.pinned_hz) {
         double off = f - center_hz_;
@@ -32,7 +34,7 @@ NdbDecoder::NdbDecoder(double center_hz, double sample_rate, DecoderConfig cfg)
 NdbChannel *NdbDecoder::add_channel(double offset_hz, bool pinned, int id)
 {
     const bool visit = id != 0;
-    channels_.push_back(std::make_unique<NdbChannel>(visit ? id : next_id_++, center_hz_, offset_hz, fs_, pinned, now_,
+    channels_.push_back(std::make_unique<NdbChannel>(visit ? id : next_id_++, center_hz_, offset_hz, bank_, pinned, now_,
                                                      cfg_.ggmorse == DecoderConfig::Ggmorse::All));
     NdbChannel *ch = channels_.back().get();
     ch->on_decode = [this, ch](const std::string &s) {
@@ -121,7 +123,9 @@ void NdbDecoder::process_iq(const int16_t *iq, size_t n_pairs)
     now_ = double(samples_) / fs_;
 
     if (det_.process(buf_.data(), n_pairs)) on_detection();
-    for (auto &ch : channels_) ch->process(buf_.data(), n_pairs, now_);
+    if (channels_.empty()) return;
+    bank_.process(buf_.data(), n_pairs);
+    for (auto &ch : channels_) ch->process(bank_, now_);
 }
 
 void NdbDecoder::on_detection()

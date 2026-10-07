@@ -28,13 +28,19 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace ndb {
 
+class RealFft;
+
 class FoldDecoder {
 public:
+    FoldDecoder();
+    ~FoldDecoder();
+
     // One tone envelope sample every 10 ms.
     void push(float e);
     // Start again (the envelope before this is unrelated to what follows).
@@ -50,6 +56,8 @@ public:
 
 private:
     void analyse();
+
+    std::unique_ptr<RealFft> acf_;   // for the autocorrelation
 
     std::vector<float> buf_;
     float r_ = 0.0f;

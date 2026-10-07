@@ -55,6 +55,7 @@
 #pragma once
 
 #include "dsp.h"
+#include "fft.h"
 
 #include <array>
 #include <deque>
@@ -64,6 +65,11 @@
 #include <vector>
 
 namespace ndb {
+
+// The means of two clusters of positive numbers, split by their logarithms,
+// or false when they do not form two (long/short under 1.8). From
+// ubersdr-skimmer (playground_cw.cpp).
+bool two_clusters(const std::vector<double> &xs, double &lo, double &hi);
 
 // International Morse: dots and dashes ("-.-.") to the letter or digit.
 const std::map<std::string, char> &morse_table();
@@ -114,6 +120,7 @@ private:
         double dit_ms = 0.0;
         float quality = 0.0f;
         std::string code;
+        std::vector<double> letter;   // this letter's mark lengths, ms
         bool in_word = false;   // letters emitted since the last word gap
 
         bool keying() const { return gate && dit_ms > 0 && quality >= kMinQuality; }
@@ -147,8 +154,8 @@ private:
     double fs_;
     // Pitch search: averaged power spectrum of the audio.
     size_t nfft_;
-    FFT fft_;
-    std::vector<cf> fbuf_;
+    RealFft fft_;      // its input is filled with windowed audio as it comes
+    std::vector<float> fwin_;
     std::vector<float> spec_;
     size_t ffill_ = 0;
     int spectra_ = 0;

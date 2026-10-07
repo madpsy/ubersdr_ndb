@@ -14,6 +14,7 @@
 #pragma once
 
 #include "dsp.h"
+#include "fft.h"
 
 #include <cstdint>
 #include <memory>
@@ -72,9 +73,8 @@ private:
     double fs_;
     DetectorConfig cfg_;
     size_t n_;
-    FFT fft_;
+    Fft fft_;          // its buffer is filled with windowed samples as they come
     std::vector<float> window_;
-    std::vector<cf> buf_;
     size_t fill_ = 0;
     std::vector<float> avg_;       // linear power, natural FFT order
     std::vector<float> db_;        // shifted dB

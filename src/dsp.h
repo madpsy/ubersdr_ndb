@@ -1,8 +1,8 @@
 // dsp.h — the small DSP toolkit the NDB decoder is built from.
 //
-// Nothing here is NDB-specific: a radix-2 FFT for the wideband carrier search,
-// a windowed-sinc lowpass designer, a complex decimating FIR, and a complex
-// rotator (NCO) for mixing a carrier down to DC. Header-only, no dependencies.
+// Nothing here is NDB-specific: a windowed-sinc lowpass designer, a complex
+// decimating FIR, a complex rotator (NCO) for mixing a carrier down to DC, and
+// biquads. Header-only, no dependencies. (FFTs are in fft.h, over FFTW.)
 
 #pragma once
 
@@ -23,53 +23,6 @@ inline size_t next_pow2(size_t n)
     while (p < n) p <<= 1;
     return p;
 }
-
-// ---------------------------------------------------------------------------
-// In-place iterative radix-2 complex FFT. Twiddles and the bit-reversal table
-// are computed once per size, so repeated transforms of the same length (the
-// only way this is used) cost nothing but the butterflies.
-// ---------------------------------------------------------------------------
-class FFT {
-public:
-    explicit FFT(size_t n) : n_(n), tw_(n / 2), rev_(n)
-    {
-        for (size_t i = 0; i < n / 2; ++i) {
-            double a = -2.0 * kPi * double(i) / double(n);
-            tw_[i] = cf(float(std::cos(a)), float(std::sin(a)));
-        }
-        size_t bits = 0;
-        while ((size_t(1) << bits) < n) ++bits;
-        for (size_t i = 0; i < n; ++i) {
-            size_t r = 0;
-            for (size_t b = 0; b < bits; ++b)
-                if (i & (size_t(1) << b)) r |= size_t(1) << (bits - 1 - b);
-            rev_[i] = r;
-        }
-    }
-
-    size_t size() const { return n_; }
-
-    void forward(cf *x) const
-    {
-        for (size_t i = 0; i < n_; ++i)
-            if (i < rev_[i]) std::swap(x[i], x[rev_[i]]);
-        for (size_t len = 2; len <= n_; len <<= 1) {
-            const size_t half = len / 2, step = n_ / len;
-            for (size_t i = 0; i < n_; i += len) {
-                for (size_t j = 0; j < half; ++j) {
-                    cf t = x[i + j + half] * tw_[j * step];
-                    x[i + j + half] = x[i + j] - t;
-                    x[i + j] += t;
-                }
-            }
-        }
-    }
-
-private:
-    size_t n_;
-    std::vector<cf> tw_;
-    std::vector<size_t> rev_;
-};
 
 // ---------------------------------------------------------------------------
 // Windowed-sinc lowpass, Blackman window. Unity gain at DC.
@@ -104,42 +57,45 @@ inline int taps_for(double transition_hz, double fs)
 // Complex decimating FIR. Only every D'th output is computed.
 //
 // The history is kept twice over (a "mirrored" ring) so every dot product runs
-// over one contiguous span without wrapping.
+// over one contiguous span without wrapping, and as separate real and
+// imaginary arrays, with eight partial sums each: without -ffast-math the
+// compiler will not reorder one running sum, and interleaved complex samples
+// cost a shuffle per load. Split, it vectorises to plain multiply-adds.
 // ---------------------------------------------------------------------------
 class Decimator {
 public:
     Decimator() = default;
     Decimator(std::vector<float> taps, int decim)
-        : h_(std::move(taps)), d_(decim), hist_(2 * h_.size()), n_(h_.size()) {}
+        : h_(std::move(taps)), d_(decim), re_(2 * h_.size()), im_(2 * h_.size()), n_(h_.size()) {}
 
     // Push one sample; returns true and sets `out` when an output is due.
     bool push(cf x, cf &out)
     {
-        hist_[pos_] = x;
-        hist_[pos_ + n_] = x;
+        re_[pos_] = re_[pos_ + n_] = x.real();
+        im_[pos_] = im_[pos_ + n_] = x.imag();
         if (++pos_ == n_) pos_ = 0;
         if (++phase_ < d_) return false;
         phase_ = 0;
         // Oldest sample is at pos_, newest at pos_+n_-1.
-        // Four partial sums per component: without -ffast-math the compiler
-        // may not reorder one running sum, which serialises the loop on the
-        // add latency. Split, it vectorises. hist_ is complex<float>, i.e.
-        // interleaved re/im floats.
-        const float *p = reinterpret_cast<const float *>(&hist_[pos_]);
-        const float *h = h_.data();
-        float r0 = 0, r1 = 0, i0 = 0, i1 = 0;
+        const float *pr = re_.data() + pos_, *pi = im_.data() + pos_, *h = h_.data();
+        constexpr size_t K = 8;
+        float sr[K] = {}, si[K] = {};
         size_t i = 0;
-        for (; i + 1 < n_; i += 2) {
-            r0 += h[i] * p[2 * i];
-            i0 += h[i] * p[2 * i + 1];
-            r1 += h[i + 1] * p[2 * i + 2];
-            i1 += h[i + 1] * p[2 * i + 3];
-        }
+        for (; i + K <= n_; i += K)
+            for (size_t k = 0; k < K; ++k) {
+                sr[k] += h[i + k] * pr[i + k];
+                si[k] += h[i + k] * pi[i + k];
+            }
         for (; i < n_; ++i) {
-            r0 += h[i] * p[2 * i];
-            i0 += h[i] * p[2 * i + 1];
+            sr[0] += h[i] * pr[i];
+            si[0] += h[i] * pi[i];
         }
-        out = cf(r0 + r1, i0 + i1);
+        float r = 0, m = 0;
+        for (size_t k = 0; k < K; ++k) {
+            r += sr[k];
+            m += si[k];
+        }
+        out = cf(r, m);
         return true;
     }
 
@@ -148,7 +104,7 @@ public:
 private:
     std::vector<float> h_;
     int d_ = 1;
-    std::vector<cf> hist_;
+    std::vector<float> re_, im_;
     size_t n_ = 0;
     size_t pos_ = 0;
     int phase_ = 0;

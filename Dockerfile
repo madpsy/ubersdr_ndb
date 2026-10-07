@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         git \
         libcurl4-openssl-dev \
+        libfftw3-dev \
         libssl-dev \
         pkg-config \
         zlib1g-dev \
@@ -46,6 +47,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libcurl4 \
+        libfftw3-single3 \
         libssl3 \
         zlib1g \
         ca-certificates \

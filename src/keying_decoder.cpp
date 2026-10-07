@@ -23,8 +23,39 @@ constexpr double kMaxDitMs    = 250.0;   // ~5 wpm
 constexpr size_t kQualityOver = 20;      // marks judged for timing quality
 constexpr int    kLaneW[]     = {2, 4, 6, 8};   // lane envelope windows, 10 ms blocks
 constexpr size_t kMaxTones    = 3;       // candidate tones followed at once
+// Pitch search. The spectra (4 s each) are averaged over ~40 s, and peaks are
+// looked for in that average summed over ±4 bins (±1 Hz): a keyed tone's
+// power is spread over its keying sidebands, while a noise bin's is not, so
+// in single bins a weak beacon's tone loses to the noise's highest bins. On a
+// capture with noise added until PIK's contrast fell to ~15 dB, single bins
+// over ~12 s chose 900-1000 Hz, and the decoder retoned every few seconds;
+// smoothed and longer, it holds 400 Hz.
+constexpr float  kPitchAlpha  = 0.1f;
+constexpr int    kPitchSmooth = 4;
 
 }  // namespace
+
+// From ubersdr-skimmer's playground_cw.cpp.
+bool two_clusters(const std::vector<double> &xs, double &lo, double &hi)
+{
+    if (xs.size() < 2) return false;
+    lo = *std::min_element(xs.begin(), xs.end());
+    hi = *std::max_element(xs.begin(), xs.end());
+    if (hi / lo < 1.8) return false;
+    for (int it = 0; it < 6; ++it) {
+        const double split = std::sqrt(lo * hi);
+        double sa = 0, sb = 0;
+        int na = 0, nb = 0;
+        for (double x : xs) {
+            if (x < split) sa += x, ++na;
+            else sb += x, ++nb;
+        }
+        if (!na || !nb) return false;
+        lo = sa / na;
+        hi = sb / nb;
+    }
+    return hi / lo >= 1.8;
+}
 
 const std::map<std::string, char> &morse_table()
 {
@@ -45,12 +76,13 @@ KeyingDecoder::KeyingDecoder(double audio_rate)
       // after one, and the average settles over a few.
       nfft_(next_pow2(size_t(audio_rate * 4.0))),
       fft_(nfft_),
-      fbuf_(nfft_),
+      fwin_(nfft_),
       spec_(nfft_ / 2, 0.0f),
       block_(int(std::lround(audio_rate * kEnvMs / 1000.0)))
 {
     static_assert(sizeof(kLaneW) / sizeof(kLaneW[0]) == std::tuple_size<decltype(lanes_)>::value);
     for (size_t i = 0; i < lanes_.size(); ++i) lanes_[i].w = kLaneW[i];
+    for (size_t i = 0; i < nfft_; ++i) fwin_[i] = float(0.5 - 0.5 * std::cos(2.0 * kPi * double(i) / double(nfft_)));
 }
 
 float KeyingDecoder::contrast_db() const
@@ -71,8 +103,7 @@ void KeyingDecoder::process(const float *a, size_t n)
     for (size_t i = 0; i < n; ++i) {
         // Pitch search runs continuously, so a retuned or re-toned beacon is
         // followed.
-        const float w = float(0.5 - 0.5 * std::cos(2.0 * kPi * double(ffill_) / double(nfft_)));
-        fbuf_[ffill_] = cf(a[i] * w, 0.0f);
+        fft_.in()[ffill_] = a[i] * fwin_[ffill_];
         if (++ffill_ == nfft_) {
             ffill_ = 0;
             update_pitch();
@@ -105,18 +136,30 @@ void KeyingDecoder::process(const float *a, size_t n)
 // apart. A candidate that is still there keeps its mixer and history.
 void KeyingDecoder::update_pitch()
 {
-    fft_.forward(fbuf_.data());
-    const float alpha = spectra_ == 0 ? 1.0f : 0.3f;
-    for (size_t k = 0; k < nfft_ / 2; ++k) spec_[k] += alpha * (std::norm(fbuf_[k]) - spec_[k]);
+    fft_.forward();
+    const cf *X = fft_.out();
+    const float alpha = spectra_ == 0 ? 1.0f : kPitchAlpha;
+    constexpr int kSm = kPitchSmooth;
+    for (size_t k = 0; k < nfft_ / 2; ++k) spec_[k] += alpha * (std::norm(X[k]) - spec_[k]);
     ++spectra_;
     const double bin = fs_ / double(nfft_);
-    const size_t k0 = size_t(300.0 / bin), k1 = std::min(nfft_ / 2 - 2, size_t(1200.0 / bin));
+    const size_t k0 = size_t(300.0 / bin), k1 = std::min(nfft_ / 2 - 2 - size_t(kSm), size_t(1200.0 / bin));
+    // Peaks are looked for in the spectrum summed over ±kSm bins.
+    std::vector<float> sm(spec_.size(), 0.0f);
+    for (size_t k = k0 - 1 - size_t(kSm); k <= k1 + 1; ++k) {
+        float a = 0.0f;
+        for (int j = -kSm; j <= kSm; ++j) a += spec_[size_t(long(k) + j)];
+        sm[k] = a;
+    }
     std::vector<size_t> peaks;
     for (size_t k = k0; k <= k1; ++k)
-        if (spec_[k] > spec_[k - 1] && spec_[k] >= spec_[k + 1]) peaks.push_back(k);
-    std::sort(peaks.begin(), peaks.end(), [&](size_t x, size_t y) { return spec_[x] > spec_[y]; });
+        if (sm[k] > sm[k - 1] && sm[k] >= sm[k + 1]) peaks.push_back(k);
+    std::sort(peaks.begin(), peaks.end(), [&](size_t x, size_t y) { return sm[x] > sm[y]; });
     std::vector<double> found;
     for (size_t k : peaks) {
+        // The line itself: the strongest raw bin under the smoothed peak.
+        for (long j = long(k) - kSm; j <= long(k) + kSm; ++j)
+            if (spec_[size_t(j)] > spec_[k]) k = size_t(j);
         double y0 = spec_[k - 1], y1 = spec_[k], y2 = spec_[k + 1];
         double den = y0 - 2.0 * y1 + y2;
         double frac = den != 0.0 ? std::clamp(0.5 * (y0 - y2) / den, -0.5, 0.5) : 0.0;
@@ -253,6 +296,7 @@ void KeyingDecoder::lane_sample(Lane &l, float e)
         l.on = false;
         l.run = 0;
         l.code.clear();
+        l.letter.clear();
         l.in_word = false;
         return;
     }
@@ -326,6 +370,7 @@ void KeyingDecoder::end_mark(Lane &l, double ms)
     l.quality = n ? float(good) / float(n) : 0.0f;
 
     l.code += ms < 2.0 * l.dit_ms ? '.' : '-';
+    l.letter.push_back(ms);
     // No Morse character has more than 6 elements; if there has been no
     // letter gap by then, emit what we have (as '?') rather than let it grow.
     if (l.code.size() > 6) flush_letter(l, false);
@@ -341,14 +386,24 @@ void KeyingDecoder::flush_letter(Lane &l, bool word)
 {
     if (!l.keying()) {
         l.code.clear();
+        l.letter.clear();
         l.in_word = false;
         return;
+    }
+    // A letter with both dots and dashes splits them itself, where its marks
+    // fall into two groups (ubersdr-skimmer's PlaygroundCw); one of a single
+    // kind keeps the split at two dits.
+    double lo, hi;
+    if (l.letter.size() == l.code.size() && two_clusters(l.letter, lo, hi)) {
+        const double at = std::sqrt(lo * hi);
+        for (size_t i = 0; i < l.letter.size(); ++i) l.code[i] = l.letter[i] > at ? '-' : '.';
     }
     const auto &t = morse_table();
     auto it = t.find(l.code);
     std::string out(1, it == t.end() ? '?' : it->second);
     if (word) out += ' ';
     l.code.clear();
+    l.letter.clear();
     l.in_word = !word;
     if (&l == &lane() && on_text) on_text(out);
 }

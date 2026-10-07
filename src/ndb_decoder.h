@@ -19,6 +19,7 @@
 #pragma once
 
 #include "carrier_detector.h"
+#include "channelizer.h"
 #include "ndb_channel.h"
 
 #include <functional>
@@ -161,6 +162,7 @@ private:
     double fs_;
     DecoderConfig cfg_;
     CarrierDetector det_;
+    Channelizer bank_;
     std::vector<std::unique_ptr<NdbChannel>> channels_;
     struct Pending { double offset_hz; int hits; bool hit_this_pass; float snr_db; };
     std::vector<Pending> pending_;

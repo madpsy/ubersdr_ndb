@@ -23,8 +23,10 @@ NdbDecoder  ─ carrier seen on 2 passes → channel; drifting carrier → retun
         │     gone for 2 min → dropped; identified → channel freed, carrier
         │     tracked, ident re-copied on a revisit every 15 min
         ▼
+Channelizer (one per stream) ─ polyphase filter bank: 3 kHz subbands at 12 kHz
+        ▼
 NdbChannel (one per beacon)
-   rotate carrier to DC → FIR ↓ to 16 kHz → FIR ↓ to 4 kHz (±1.3 kHz)
+   its carrier's subband → rotate carrier to DC → FIR ↓3 to 4 kHz (±1.3 kHz)
    → AM envelope ÷ carrier level → 4th-order 250 Hz high-pass
    ├→ KeyingDecoder (NDB-specific: the copy shown)   ─┐
    │    └→ FoldDecoder (the ident averaged over       ─┤
@@ -49,7 +51,7 @@ Most NDBs are A2A: a continuous carrier with the ident keyed as a 400 or 1020 Hz
 
 **KeyingDecoder** (`src/keying_decoder.*`) is written for how NDBs key: a machine sending the same letters at a fixed speed and level, with a long silence between repetitions. It learns the things that don't change, over a span long enough to include both keying and silence:
 
-- the tone: of the three strongest lines in a long averaged spectrum, the one that is keyed (a steady beat against a neighbouring carrier can be stronger than the tone itself);
+- the tone: of the three strongest lines in a spectrum averaged over ~40 s and summed over ±1 Hz (so a weak keyed tone, its power spread over its keying sidebands, isn't outshone by single noise bins), the one that is keyed (a steady beat against a neighbouring carrier can be stronger than the tone itself);
 - the on/off threshold, from the last 20 s of tone envelope: on at 50% of the way from floor to peak, off at 40%;
 - the dit length, from the last 60 marks.
 
@@ -162,7 +164,7 @@ NDB_STREAMS: "411000:iq384"                # all of them, 1 session, 384 kHz of 
 NDB_STREAMS: "359000:iq96"                 # 316–402 kHz: 93 of 110 NDBs, no password needed
 ```
 
-Plain `iq` (10 kHz) is not supported. It is too narrow to be worth it, and each channel decimates by integer factors to 16 kHz and 4 kHz.
+Plain `iq` (10 kHz) is not supported. It is too narrow to be worth it, and the channelizer needs a rate that splits into 3 kHz subbands at 12 kHz, which each channel decimates by 3 to 4 kHz.
 
 ---
 
@@ -223,7 +225,9 @@ When the receiver has Home Assistant discovery on, these are declared, all readi
 
 ## Building from source
 
-Needs `build-essential cmake libcurl4-openssl-dev libssl-dev zlib1g-dev pkg-config`.
+Needs `build-essential cmake libcurl4-openssl-dev libfftw3-dev libssl-dev zlib1g-dev pkg-config`.
+
+On x86-64 it builds for `x86-64-v3` (AVX2 and FMA: any x86 since Haswell or Zen), as ubersdr-skimmer does; the IQ stream's decoder and the filters vectorise with it. `-DNDB_X86_ARCH=native` tunes for the build machine, and `-DNDB_X86_ARCH=` builds for the compiler's baseline.
 
 ```bash
 ./build.sh                  # clones IXWebSocket, fetches navaids.csv, builds build/ubersdr_ndb
@@ -241,13 +245,18 @@ ubersdr_ndb --iq-file cap.iq --rate 96000 --center 359000 --lat 56.04 --lon -3.3
 # one channel's ggmorse input as a WAV; CHAN_WPM / CHAN_PITCH pin ggmorse
 cmake --build build --target chan_audio
 ./build/chan_audio cap.iq 96000 359000 341000 edn.wav
+# chosen beacons decoded and scored: copies of the expected ident, and other
+# 2-4 letter tokens (busts and noise); CHAN_NOISE=N adds white noise (rms, int16
+# units) to make strong beacons weak, CHAN_GGMORSE=1 runs ggmorse too
+cmake --build build --target chan_eval
+./build/chan_eval cap.iq 192000 356000 341000:EDN 380000:CBL 404000:-
 ```
 
 ---
 
 ## Status and next steps
 
-A working base. Tested against a live receiver in Scotland: it identified EDN, UW, PIK, ATF, DND, CBL and CFN (333 km), placed them correctly, and put nothing false in the heard log. With the default `iq192` stream and 48 channels (before revisits, when every identified beacon kept a channel) it used ~16% of one core and ~45 MB. About two thirds of that is the per-channel mixer and decimation filters; a shared FFT channelizer would cut it further if needed.
+A working base. Tested against a live receiver in Scotland: it identified EDN, UW, PIK, ATF, DND, CBL and CFN (333 km), placed them correctly, and put nothing false in the heard log. With the default `iq192` stream and 48 channels (before revisits, when every identified beacon kept a channel) it used ~16% of one core and ~45 MB. Since then the per-channel mixer and filters have given way to a shared polyphase channelizer, FFTs to FFTW, and the build to AVX2 (as in ubersdr-skimmer), and ggmorse's two hottest loops have been restructured with unchanged output. Replaying 5 minutes of `iq192` from the same site took 11.5 s of CPU before and 5.3 s after; live, side by side, 8.0% of a core against 6.5%. About a third of what is left is UberSDR's IQ stream codec (`pcm_v4.hpp`, the same as ubersdr-skimmer's).
 
 Known gaps, roughly in order of payoff:
 

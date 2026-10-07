@@ -30,3 +30,17 @@ Not a change to ggmorse, but a requirement on its caller: `thresholdF` (and
 Local change (CPU): with `frequency_hz` given, `decode_float()` skips the
 short-time FFT, which only serves the pitch search. `getSpectrogram()` is
 then not updated.
+
+Local change (CPU): `decode_float()` finds where the envelope crosses each
+threshold level once per frame, rather than once per (speed, level) pair: the
+crossings depend on the level alone. Each pair starts from a copy of its
+level's intervals, exactly as the scan made them, so the output is unchanged
+(identical copies on the test capture).
+
+Local change (CPU): `GoertzelRunningFIR::filter()` computes the windowed
+Goertzel as what it equals, |sum of w[i] x[i] e^(-j w i)|^2, a dot product with
+a table remade only when the frequency changes, with independent partial sums
+that vectorise; the recursion was one dependency chain run for every audio
+sample. Float rather than double accumulation; the same copies on the test
+capture. The history ring is stored twice over so the window never wraps, and
+`filtered()` unrolls its ring with two copies instead of a loop per sample.

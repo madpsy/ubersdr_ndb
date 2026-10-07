@@ -2,9 +2,10 @@
 //
 // Signal path, per channel:
 //
-//   wideband IQ (fs) ──► rotator: carrier → DC
-//                    ──► FIR ↓D1 to 16 kHz        (coarse; kills far-off signals)
-//                    ──► FIR ↓4  to  4 kHz        (±1.3 kHz channel)
+//   wideband IQ (fs) ──► Channelizer (shared by the stream): the 3 kHz-spaced
+//                        subband nearest the carrier, at 12 kHz
+//                    ──► rotator: carrier → DC
+//                    ──► FIR ↓3 to 4 kHz          (±1.3 kHz channel)
 //                    ──► |z|  AM envelope, normalised by the carrier level
 //                    ──┬► KeyingDecoder (NDB-specific; the copy shown)  ─┐
 //                      │    └► FoldDecoder (the ident averaged over       ─┤
@@ -20,6 +21,7 @@
 
 #pragma once
 
+#include "channelizer.h"
 #include "dsp.h"
 #include "fold_decoder.h"
 #include "keying_decoder.h"
@@ -74,15 +76,16 @@ class NdbChannel {
 public:
     // use_ggmorse: also run ggmorse as a second decoder feeding the ident
     // tally. It is ~90% of the CPU of a channel, so it is optional.
-    NdbChannel(int id, double center_hz, double offset_hz, double fs, bool pinned, double now_s,
+    NdbChannel(int id, double center_hz, double offset_hz, const Channelizer &bank, bool pinned, double now_s,
                bool use_ggmorse = false);
     ~NdbChannel();
 
     NdbChannel(const NdbChannel &) = delete;
     NdbChannel &operator=(const NdbChannel &) = delete;
 
-    // now_s is stream time (seconds of IQ consumed), used for all ages below.
-    void process(const cf *x, size_t n, double now_s);
+    // Read this channel's subband from the rows the bank made of the latest
+    // IQ. now_s is stream time (seconds of IQ consumed), used for all ages below.
+    void process(const Channelizer &bank, double now_s);
 
     // Carrier moved (drift, or a better estimate): retune, phase-continuously.
     void retune(double offset_hz);
@@ -104,7 +107,7 @@ public:
     double created_s() const { return created_; }
 
     int    id() const { return id_; }
-    double offset_hz() const { return rot_.freq(); }
+    double offset_hz() const { return offset_; }
     bool   pinned() const { return pinned_; }
     double last_seen_s() const { return last_seen_; }
 
@@ -130,11 +133,14 @@ private:
 
     int id_;
     double center_hz_;
-    double fs_;
+    const Channelizer &bank_;
     bool pinned_;
 
-    Rotator rot_;
-    Decimator dec1_, dec2_;
+    double offset_;     // carrier, from the IQ centre
+    int band_;          // the bank's subband read
+    Rotator rot_;       // carrier's offset within it → DC
+    Decimator dec_;
+    std::vector<cf> sub_;
 
     // AM detector state.
     float dc_ = 0.0f;           // carrier magnitude, slow average

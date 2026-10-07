@@ -167,6 +167,7 @@ struct GGMorse::Impl {
 
     // todo : refactor
     std::vector<std::vector<std::vector<Interval>>> intervalsAll = {};
+    std::vector<std::vector<Interval>> crossings = {};   // per level (see decode_float)
 
     STFFT stfft = {};
     Filter filterHighPass = {};
@@ -786,50 +787,51 @@ void GGMorse::decode_float() {
         int l1 = (mode == 0) ? 90 : lOld + 10;
         int dl = (mode == 0) ? 20 : 2;
 
+        // ubersdr_ndb: where the envelope crosses a level depends on the
+        // level alone, not on the speed being tried, so each level's crossings
+        // are found once here rather than once per speed (the scan over the
+        // window was most of a frame's cost). Each (speed, level) then starts
+        // from a copy of its level's intervals, exactly as the scan made them:
+        // `len` in dots at that speed, and the last interval, never closed by
+        // a crossing, keeping the `len` of the one before it (0 if none).
+        auto & crossings = m_impl->crossings;
+        crossings.resize(101);
+        for (int l = l0; l <= l1; l += dl) {
+            if (l < 0 || l > 100) continue;
+            float level = (0.01*mean)*l;
+            auto & cr = crossings[l];
+            cr.clear();
+            int lastSignal = filteredF[0] > level ? 1 : 0;
+            Interval cur;
+            cur.signal = lastSignal;
+            cur.start = 0;
+            for (int i = 1; i < nSamples; ++i) {
+                int curSignal = filteredF[i] > level ? 1 : 0;
+                if (curSignal != lastSignal) {
+                    cur.end = i;
+                    cr.push_back(cur);
+                    cur.signal = curSignal;
+                    cur.start = i;
+                    lastSignal = curSignal;
+                }
+            }
+            cur.end = nSamples;
+            cr.push_back(cur);
+        }
+
         for (int s = s0; s <= s1 && s < 55; s += ds) {
             float lendot_samples = kBaseSampleRate*(1e-3*lendot_ms(5 + s))/nDownsample;
 
             for (int l = l0; l <= l1; l += dl) {
-                float level = (0.01*mean)*l;
-                int lastSignal = filteredF[0] > level ? 1 : 0;
-
-                Interval curInterval;
-                curInterval.signal = lastSignal;
-                curInterval.start = 0;
-                curInterval.avg = filteredF[0];
-
                 auto & intervals = m_impl->intervalsAll[s][l];
-                intervals.clear();
-
-                int nOnIntervals = 0;
-                [[maybe_unused]] float avgOnLength = 0.0f;
-
-                for (int i = 1; i < nSamples; ++i) {
-                    int curSignal = filteredF[i] > level ? 1 : 0;
-                    if (curSignal != lastSignal) {
-                        curInterval.end = i;
-                        curInterval.avg /= (i - curInterval.start);
-                        curInterval.len = float(curInterval.end - curInterval.start)/lendot_samples;
-                        intervals.push_back(curInterval);
-
-                        if (curInterval.signal == 1) {
-                            nOnIntervals++;
-                            avgOnLength += curInterval.len;
-                        }
-
-                        curInterval.signal = curSignal;
-                        curInterval.start = i;
-                        curInterval.avg = filteredF[i];
-                        lastSignal = curSignal;
-                    } else {
-                        curInterval.avg += filteredF[i];
-                    }
+                intervals = crossings[l];
+                const int nScanned = (int) intervals.size();
+                float lastLen = 0.0f;
+                for (int i = 0; i + 1 < nScanned; ++i) {
+                    intervals[i].len = float(intervals[i].end - intervals[i].start)/lendot_samples;
+                    lastLen = intervals[i].len;
                 }
-
-                avgOnLength /= nOnIntervals;
-
-                curInterval.end = nSamples;
-                intervals.push_back(curInterval);
+                intervals[nScanned - 1].len = lastLen;
 
                 int nIntervals = (int) intervals.size();
 

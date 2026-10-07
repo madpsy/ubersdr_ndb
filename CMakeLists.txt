@@ -7,6 +7,21 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# AVX2 and FMA (as ubersdr-skimmer): the IQ stream's decoder (pcm_v4.hpp), the
+# filter bank and the FIRs vectorise with them. The default, x86-64-v3, runs
+# on any x86 since Haswell or Zen; "native" tunes for the build machine alone,
+# and an empty value builds for the compiler's baseline. Not applied on ARM.
+set(NDB_X86_ARCH "x86-64-v3" CACHE STRING "-march for x86-64 builds (x86-64-v3, native, or empty)")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64" AND NDB_X86_ARCH)
+    add_compile_options(-march=${NDB_X86_ARCH})
+endif()
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_compile_options(-Wno-psabi)
+endif()
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(FFTW3F REQUIRED IMPORTED_TARGET fftw3f)
+
 # -----------------------------------------------------------------------
 # ggmorse — vendored from UberSDR's cw-decoder (third_party/ggmorse).
 # -----------------------------------------------------------------------
@@ -22,6 +37,8 @@ target_compile_options(ggmorse PRIVATE -w)
 # NDB DSP core — no network dependencies, so tools and tests can link it.
 # -----------------------------------------------------------------------
 add_library(ndbcore STATIC
+    src/fft.cpp
+    src/channelizer.cpp
     src/carrier_detector.cpp
     src/ndb_channel.cpp
     src/ndb_decoder.cpp
@@ -30,7 +47,7 @@ add_library(ndbcore STATIC
     src/fold_decoder.cpp
 )
 target_include_directories(ndbcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(ndbcore PUBLIC ggmorse)
+target_link_libraries(ndbcore PUBLIC ggmorse PkgConfig::FFTW3F)
 target_compile_options(ndbcore PRIVATE -Wall -Wextra)
 
 # -----------------------------------------------------------------------
@@ -38,7 +55,6 @@ target_compile_options(ndbcore PRIVATE -Wall -Wextra)
 # ubersdr_navtex / ubersdr_dsc). The Dockerfile clones it and passes
 # -DIXWS_ROOT; locally it defaults to the copy in the ka9q_ubersdr checkout.
 # -----------------------------------------------------------------------
-find_package(PkgConfig REQUIRED)
 pkg_check_modules(CURL REQUIRED libcurl)
 find_package(Threads REQUIRED)
 
@@ -75,3 +91,7 @@ install(TARGETS ubersdr_ndb)
 # Debug tool: one channel's ggmorse input audio as a WAV (not built by default).
 add_executable(chan_audio EXCLUDE_FROM_ALL tools/chan_audio.cpp)
 target_link_libraries(chan_audio PRIVATE ndbcore)
+
+# Debug tool: chosen beacons' copies from a raw IQ file, scored (not built by default).
+add_executable(chan_eval EXCLUDE_FROM_ALL tools/chan_eval.cpp)
+target_link_libraries(chan_eval PRIVATE ndbcore)

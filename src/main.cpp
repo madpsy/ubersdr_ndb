@@ -181,7 +181,7 @@ bool parse_stream(const std::string &s, StreamSpec &out)
     }
     if (!valid_mode(out.mode)) {
         fprintf(stderr, "error: stream '%s': mode must be iq48, iq96, iq192 or iq384 "
-                        "(plain iq is 10 kHz: too narrow, and not a multiple of 16 kHz)\n", s.c_str());
+                        "(plain iq is 10 kHz: too narrow)\n", s.c_str());
         return false;
     }
     return true;

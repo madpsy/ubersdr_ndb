@@ -11,7 +11,6 @@ namespace ndb {
 
 namespace {
 
-constexpr double kStage1Rate  = 16000.0;
 constexpr double kPassHz      = 1300.0;   // channel half-bandwidth kept
 constexpr size_t kTextMax     = 400;      // decoded text kept per channel
 // The ident tally looks back an hour. A strong beacon is identified within a
@@ -29,28 +28,25 @@ constexpr float kSpeedMaxWpm  = 20.0f;
 
 }  // namespace
 
-NdbChannel::NdbChannel(int id, double center_hz, double offset_hz, double fs, bool pinned, double now_s,
-                       bool use_ggmorse)
-    : id_(id), center_hz_(center_hz), fs_(fs), pinned_(pinned),
+NdbChannel::NdbChannel(int id, double center_hz, double offset_hz, const Channelizer &bank, bool pinned,
+                       double now_s, bool use_ggmorse)
+    : id_(id), center_hz_(center_hz), bank_(bank), pinned_(pinned), offset_(offset_hz),
       key_(kAudioRate), created_(now_s), last_seen_(now_s), now_(now_s)
 {
     key_.on_text = [this](const std::string &s) { on_text(s, now_, Source::Keying); };
     key_.on_envelope = [this](float e) { fold_.push(e); };
     key_.on_retone = [this] { fold_.reset(); };
     fold_.on_text = [this](const std::string &s) { on_text(s, now_, Source::Fold); };
-    rot_.set(offset_hz, fs);
+    double rel = 0.0;
+    band_ = bank_.subband_for(offset_hz, &rel);
+    rot_.set(rel, bank_.out_rate());
 
-    // Stage 1: fs → 16 kHz. Only needs to protect ±kPassHz from what folds
-    // onto it, so the transition band is nearly the whole 16 kHz: short filter.
-    const int d1 = int(std::lround(fs / kStage1Rate));
-    const double stop1 = kStage1Rate - kPassHz;
-    dec1_ = Decimator(design_lowpass(taps_for(stop1 - kPassHz, fs), 0.5 * (kPassHz + stop1), fs), d1);
-
-    // Stage 2: 16 kHz → 4 kHz. Anything above 4000-1300 = 2700 Hz would fold
-    // back into ±1300, so that is the stopband edge.
-    const double stop2 = kAudioRate - kPassHz;
-    dec2_ = Decimator(design_lowpass(taps_for(stop2 - kPassHz, kStage1Rate), 0.5 * (kPassHz + stop2), kStage1Rate),
-                      int(kStage1Rate / kAudioRate));
+    // The subband (12 kHz) → 4 kHz. Anything above 4000-1300 = 2700 Hz would
+    // fold back into ±1300, so that is the stopband edge.
+    const double fsb = bank_.out_rate();
+    const double stop = kAudioRate - kPassHz;
+    dec_ = Decimator(design_lowpass(taps_for(stop - kPassHz, fsb), 0.5 * (kPassHz + stop), fsb),
+                     int(std::lround(fsb / kAudioRate)));
 
     dc_alpha_ = float(1.0 - std::exp(-1.0 / (1.0 * kAudioRate)));
 
@@ -103,7 +99,13 @@ NdbChannel::~NdbChannel() = default;
 
 void NdbChannel::retune(double offset_hz)
 {
-    rot_.set(offset_hz, fs_);
+    offset_ = offset_hz;
+    // Another subband only once the carrier is well past the edge of its own
+    // (0.65 of the spacing, so a carrier on a boundary does not flit between
+    // two); ±kPassHz stays inside the flat part either way.
+    double rel = offset_hz - bank_.centre_of(band_);
+    if (std::fabs(rel) > 0.65 * bank_.spacing()) band_ = bank_.subband_for(offset_hz, &rel);
+    rot_.set(rel, bank_.out_rate());
 }
 
 void NdbChannel::lock(float pitch_hz, float speed_wpm)
@@ -125,13 +127,13 @@ void NdbChannel::seen(float snr_db, double now_s)
     last_seen_ = now_s;
 }
 
-void NdbChannel::process(const cf *x, size_t n, double now_s)
+void NdbChannel::process(const Channelizer &bank, double now_s)
 {
     now_ = now_s;
-    cf y1, y2;
-    for (size_t i = 0; i < n; ++i) {
-        if (!dec1_.push(rot_.mix(x[i]), y1)) continue;
-        if (!dec2_.push(y1, y2)) continue;
+    bank.read(band_, sub_);
+    cf y2;
+    for (const cf &x : sub_) {
+        if (!dec_.push(rot_.mix(x), y2)) continue;
 
         // AM envelope, normalised by the carrier so every channel reaches
         // ggmorse at the same scale regardless of signal strength: with the
@@ -315,7 +317,7 @@ ChannelSnapshot NdbChannel::snapshot(double now_s) const
 {
     ChannelSnapshot s;
     s.id = id_;
-    s.offset_hz = rot_.freq();
+    s.offset_hz = offset_;
     s.freq_hz = center_hz_ + s.offset_hz;
     s.snr_db = snr_db_;
     s.carrier_db = dc_ > 0 ? 20.0f * std::log10(dc_) : -200.0f;

@@ -26,7 +26,8 @@ int main(int argc, char **argv)
     FILE *out = fopen(argv[5], "wb");
     if (!in || !out) { perror("open"); return 1; }
     std::vector<int16_t> pcm;
-    ndb::NdbChannel ch(1, centre, beacon - centre, fs, true, 0.0, true);
+    ndb::Channelizer bank(fs);
+    ndb::NdbChannel ch(1, centre, beacon - centre, bank, true, 0.0, true);
     // CHAN_PITCH / CHAN_WPM pin ggmorse, to separate pitch/speed-search
     // failures from everything upstream of it.
     const char *lp = getenv("CHAN_PITCH"), *lw = getenv("CHAN_WPM");
@@ -45,7 +46,8 @@ int main(int argc, char **argv)
         x.resize(n);
         for (size_t i = 0; i < n; ++i) x[i] = ndb::cf(raw[2 * i] / 32768.f, raw[2 * i + 1] / 32768.f);
         t += n / fs;
-        ch.process(x.data(), n, t);
+        bank.process(x.data(), n);
+        ch.process(bank, t);
         auto s = ch.snapshot(t);
         if (s.text.size() + s.text_fold.size() != shown) {
             fprintf(stderr, "%7.1fs pitch %4.0f wpm %4.1f win %2d ms %4.1f dB | %s\n", t, s.pitch_hz, s.speed_wpm,

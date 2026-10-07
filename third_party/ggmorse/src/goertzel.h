@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <vector>
 #include <cmath>
 
@@ -21,7 +22,9 @@ struct GoertzelRunningFIR {
         int history_samples = history_s*sampleRate;
 
         m_historyHead = 0;
-        m_history.resize(history_samples, 0);
+        m_histN = history_samples;
+        m_history.assign(2*history_samples, 0.0f);
+        m_tabFreq = -1.0f;
 
         m_filteredHead = 0;
         m_filtered.resize(history_samples - window_samples, 0);
@@ -32,7 +35,7 @@ struct GoertzelRunningFIR {
 
     void process(float * samples, int n, float frequency_hz) {
         int nw = (int) m_hamming.size();
-        int nh = (int) m_history.size();
+        int nh = m_histN;
         int nf = (int) m_filtered.size();
 
         float normalizedfreq = frequency_hz/m_sampleRate;
@@ -44,9 +47,11 @@ struct GoertzelRunningFIR {
         m_coeff = 2.0*wr;
         m_cos = wr;
         m_sin = wi;
+        table(frequency_hz);
 
         for (int i = 0; i < n; ++i) {
             m_history[m_historyHead] = samples[i];
+            m_history[m_historyHead + nh] = samples[i];
             m_historyHead++;
             if (m_historyHead >= nh) {
                 m_historyHead = 0;
@@ -65,7 +70,7 @@ struct GoertzelRunningFIR {
 
     void recompute(float frequency_hz) {
         int nw = (int) m_hamming.size();
-        int nh = (int) m_history.size();
+        int nh = m_histN;
         int nf = (int) m_filtered.size();
 
         float normalizedfreq = frequency_hz/m_sampleRate;
@@ -77,6 +82,7 @@ struct GoertzelRunningFIR {
         m_coeff = 2.0*wr;
         m_cos = wr;
         m_sin = wi;
+        table(frequency_hz);
 
         m_processed_samples = 0;
 
@@ -98,17 +104,10 @@ struct GoertzelRunningFIR {
     }
 
     const std::vector<float> & filtered() {
-        int nf = (int) m_filtered.size();
-
-        int j = m_filteredHead;
-        for (int i = 0; i < nf; ++i) {
-            m_filteredOut[i] = m_filtered[j];
-            j++;
-            if (j >= nf) {
-                j = 0;
-            }
-        }
-
+        // ubersdr_ndb: the ring unrolled oldest first, as two copies.
+        const size_t nf = m_filtered.size(), head = size_t(m_filteredHead);
+        std::copy(m_filtered.begin() + head, m_filtered.end(), m_filteredOut.begin());
+        std::copy(m_filtered.begin(), m_filtered.begin() + head, m_filteredOut.begin() + (nf - head));
         return m_filteredOut;
     }
 
@@ -143,25 +142,52 @@ struct GoertzelRunningFIR {
     }
 
 private:
-    float filter(int idx) {
-        if (idx < 0) idx += m_history.size();
-
-        double sprev = 0.0;
-        double sprev2 = 0.0;
-        double s, imag, real;
-
-        int n = (int) m_hamming.size();
-        for (int i = 0; i < n; i++) {
-            s = m_hamming[i]*m_history[idx++] + m_coeff*sprev - sprev2;
-            if (idx >= (int) m_history.size()) idx = 0;
-            sprev2 = sprev;
-            sprev = s;
+    // ubersdr_ndb: the windowed Goertzel over the n samples from idx, whose
+    // result is |sum over i of w[i] x[idx + i] e^(-j w i)|^2, taken as that
+    // sum directly: a dot product with a table of w[i] e^(-j w i), made once
+    // per frequency, with independent partial sums the compiler vectorises.
+    // Goertzel's recursion is one long dependency chain, and ran every audio
+    // sample, for most of the decoder's time. The history is kept twice over
+    // so the n samples never wrap.
+    void table(float frequency_hz) {
+        if (frequency_hz == m_tabFreq) return;
+        m_tabFreq = frequency_hz;
+        const int n = (int) m_hamming.size();
+        m_tabRe.resize(n);
+        m_tabIm.resize(n);
+        const double w = 2.0*M_PI*double(frequency_hz)/double(m_sampleRate);
+        for (int i = 0; i < n; ++i) {
+            m_tabRe[i] = float(m_hamming[i]*std::cos(w*i));
+            m_tabIm[i] = float(-m_hamming[i]*std::sin(w*i));
         }
+    }
 
-        real = sprev*m_cos - sprev2;
-        imag = -sprev*m_sin;
+    float filter(int idx) {
+        if (idx < 0) idx += m_histN;
 
-        return real*real + imag*imag;
+        constexpr int K = 8;
+        float re[K] = {}, im[K] = {};
+        const float * x = m_history.data() + idx;
+        const float * tr = m_tabRe.data();
+        const float * ti = m_tabIm.data();
+        const int n = (int) m_tabRe.size();
+        int i = 0;
+        for (; i + K <= n; i += K) {
+            for (int k = 0; k < K; ++k) {
+                re[k] += x[i + k]*tr[i + k];
+                im[k] += x[i + k]*ti[i + k];
+            }
+        }
+        for (; i < n; ++i) {
+            re[0] += x[i]*tr[i];
+            im[0] += x[i]*ti[i];
+        }
+        float sr = 0.0f, si = 0.0f;
+        for (int k = 0; k < K; ++k) {
+            sr += re[k];
+            si += im[k];
+        }
+        return sr*sr + si*si;
     }
 
     int m_processed_samples = 0;
@@ -174,7 +200,11 @@ private:
     std::vector<float> m_hamming;
 
     int m_historyHead = 0;
-    std::vector<float> m_history;
+    int m_histN = 0;
+    std::vector<float> m_history;   // m_histN samples, twice over
+
+    float m_tabFreq = -1.0f;
+    std::vector<float> m_tabRe, m_tabIm;
 
     int m_filteredHead = 0;
     std::vector<float> m_filtered;

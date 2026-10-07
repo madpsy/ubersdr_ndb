@@ -14,7 +14,6 @@ CarrierDetector::CarrierDetector(double sample_rate, DetectorConfig cfg)
       n_(next_pow2(size_t(sample_rate / 3.0))),
       fft_(n_),
       window_(n_),
-      buf_(n_),
       avg_(n_, 0.0f),
       db_(n_, -200.0f),
       floor_db_(n_, -200.0f)
@@ -26,15 +25,20 @@ CarrierDetector::CarrierDetector(double sample_rate, DetectorConfig cfg)
 bool CarrierDetector::process(const cf *x, size_t n)
 {
     bool detected = false;
-    for (size_t i = 0; i < n; ++i) {
-        buf_[fill_] = x[i] * window_[fill_];
-        if (++fill_ < n_) continue;
+    cf *buf = fft_.data();
+    while (n > 0) {
+        const size_t take = std::min(n, n_ - fill_);
+        for (size_t i = 0; i < take; ++i) buf[fill_ + i] = x[i] * window_[fill_ + i];
+        fill_ += take;
+        x += take;
+        n -= take;
+        if (fill_ < n_) continue;
         fill_ = 0;
 
-        fft_.forward(buf_.data());
+        fft_.forward();
         const float a = frames_ == 0 ? 1.0f : cfg_.avg_alpha;
         for (size_t k = 0; k < n_; ++k) {
-            float p = std::norm(buf_[k]);
+            float p = std::norm(buf[k]);
             avg_[k] += a * (p - avg_[k]);
         }
         ++frames_;

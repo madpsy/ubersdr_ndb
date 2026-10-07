@@ -1,5 +1,6 @@
 #include "fold_decoder.h"
 
+#include "fft.h"
 #include "keying_decoder.h"
 
 #include <algorithm>
@@ -100,6 +101,9 @@ std::string read_cycle(const std::vector<float> &prof, double &err_out)
 
 }  // namespace
 
+FoldDecoder::FoldDecoder() = default;
+FoldDecoder::~FoldDecoder() = default;
+
 void FoldDecoder::push(float e)
 {
     buf_.push_back(e);
@@ -125,14 +129,23 @@ void FoldDecoder::analyse()
     if (den <= 0.0) return;
 
     // Autocorrelation over the lags a cycle can have, scaled for the overlap
-    // shrinking as the lag grows.
+    // shrinking as the lag grows. Through an FFT (zero-padded past the longest
+    // lag, so nothing wraps): one transform and back a minute, where summing
+    // every lag directly was ~17M multiply-adds.
     const int max_lag = std::min<int>(kMaxLag, int(n / 2));
     std::vector<double> r(size_t(max_lag) + 2, 0.0);
-    for (int L = kMinLag - 1; L <= max_lag + 1 && size_t(L) < n; ++L) {
-        double acc = 0.0;
-        for (size_t i = 0; i + size_t(L) < n; ++i) acc += double(y[i]) * y[i + size_t(L)];
-        if (size_t(L) < r.size()) r[size_t(L)] = acc / den * double(n) / double(n - size_t(L));
-    }
+    const size_t nfft = next_pow2(n + size_t(max_lag) + 2);
+    if (!acf_ || acf_->size() != nfft) acf_ = std::make_unique<RealFft>(nfft, true);
+    float *in = acf_->in();
+    std::copy(y.begin(), y.end(), in);
+    std::fill(in + n, in + nfft, 0.0f);
+    acf_->forward();
+    std::complex<float> *X = acf_->out();
+    for (size_t k = 0; k <= nfft / 2; ++k) X[k] = std::norm(X[k]);
+    acf_->inverse();
+    for (int L = kMinLag - 1; L <= max_lag + 1 && size_t(L) < n; ++L)
+        if (size_t(L) < r.size())
+            r[size_t(L)] = double(in[L]) / double(nfft) / den * double(n) / double(n - size_t(L));
     int lag = kMinLag;
     for (int L = kMinLag; L <= max_lag; ++L)
         if (r[size_t(L)] > r[size_t(lag)]) lag = L;
