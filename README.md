@@ -2,7 +2,7 @@
 
 **Multi-beacon NDB decoder addon for [UberSDR](https://github.com/madpsy/ka9q_ubersdr)**
 
-Requests one or more wideband IQ streams from UberSDR, finds every non-directional beacon (NDB) carrier in them, and decodes each beacon's Morse ident **in parallel**. Decoded idents are matched against the [OurAirports](https://ourairports.com/data/) navaid database and located relative to the receiver. A web UI shows the spectrum, a live beacon table, the copy as it is decoded, a persistent heard log, a map, and reception stats over time for propagation.
+Requests one or more wideband IQ streams from UberSDR, finds every non-directional beacon (NDB) carrier in them, and decodes each beacon's Morse ident **in parallel**. Decoded idents are matched against the [OurAirports](https://ourairports.com/data/) navaid database, with [RXX](https://rxx.classaxe.com/en/rww/signals)'s list of active NDBs merged in, and located relative to the receiver. A web UI shows the spectrum, a live beacon table, the copy as it is decoded, a persistent heard log, a map, and reception stats over time for propagation.
 
 The default, one `iq192` stream centred on 356 kHz, covers roughly 270–442 kHz and costs a single UberSDR session, however many beacons are in it. It's chosen from the navaid list: the UK and Ireland's 110 NDBs sit on 77 frequencies from 277 to 545 kHz, all but one of them at 277–434 kHz. This window takes in every one except Lichfield (545 kHz); add `545000:iq48` for that. For another region, see [Streams](#streams).
 
@@ -83,7 +83,12 @@ On the test capture, 368.0 **UW** (a 56 dB beacon with 1.5 s of keying then 6 s 
 
 ### Naming beacons
 
-The OurAirports `navaids.csv` is downloaded when the image is built (and by `./build.sh`). For each carrier the UI shows:
+Two lists are downloaded when the image is built (and by `./build.sh`), so a running addon never fetches either:
+
+- the OurAirports `navaids.csv` (its NDB and NDB-DME rows);
+- RXX's active NDBs, `rww_ndb.csv` (`tools/fetch_rww.sh`; the image build fails if it doesn't return the full list). RXX is kept by listeners, and has beacons OurAirports lacks: at EI4HQ (Cobh) these include NQY (347 kHz, Newquay), OSA (351, Ouessant), OL (339, Shannon), CUL (370, Culdrose) and CDF (388.5, Cardiff). Its beacons with a position are merged in, except where OurAirports has the same ident within 1 kHz and 100 km.
+
+For each carrier the UI shows:
 
 | mark | meaning |
 |---|---|

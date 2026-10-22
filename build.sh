@@ -3,7 +3,7 @@
 #
 # Requires: build-essential, cmake, libcurl4-openssl-dev,
 #           libssl-dev, zlib1g-dev, pkg-config, and IXWebSocket (cloned
-#           automatically). Also fetches the OurAirports navaid list.
+#           automatically). Also fetches the OurAirports navaid list and RXX's NDB list.
 #
 # Usage:
 #   ./build.sh [--clean|-c]
@@ -46,6 +46,13 @@ if [[ ! -f "${BUILD_DIR}/navaids.csv" ]]; then
   mkdir -p "${BUILD_DIR}"
   curl -fsSL -o "${BUILD_DIR}/navaids.csv" https://davidmegginson.github.io/ourairports-data/navaids.csv \
     || echo "warning: could not fetch navaids.csv — beacons will not be named"
+  echo ""
+fi
+if [[ ! -f "${BUILD_DIR}/rww_ndb.csv" ]]; then
+  echo "--- Fetching rww_ndb.csv (RXX) ---"
+  mkdir -p "${BUILD_DIR}"
+  "${SCRIPT_DIR}/tools/fetch_rww.sh" "${BUILD_DIR}/rww_ndb.csv" \
+    || echo "warning: could not fetch rww_ndb.csv — beacons missing from OurAirports will not be named"
   echo ""
 fi
 

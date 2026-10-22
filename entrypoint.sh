@@ -28,7 +28,8 @@
 #   WEB_PORT           Web UI port (default: 6100)
 #   DATA_DIR           Heard log directory (default: /data)
 #   WEB_STATIC         Web UI files (default: /usr/local/share/ubersdr_ndb/static)
-#   NAVAIDS            OurAirports navaids.csv (default: /usr/local/share/ubersdr_ndb/navaids.csv)
+#   NAVAIDS            OurAirports navaids.csv (default: /usr/local/share/ubersdr_ndb/navaids.csv);
+#                      RXX's rww_ndb.csv is read from beside it
 #   NDB_LOG_SUMMARY    Log the full beacon table every N seconds (default: off)
 #   NDB_MQTT           0 = don't publish to MQTT through UberSDR (default: 1)
 #   UBERSDR_INGEST_URL UberSDR's addon MQTT ingest port (default: port 6926 on

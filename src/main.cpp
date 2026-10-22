@@ -75,6 +75,7 @@ struct Options {
     std::string web_static = "./static";
     int         min_margin = kMinMarginDefault;
     std::string navaids_path;
+    std::string rww_path;     // RXX's NDB list, merged in; default: beside navaids_path
     double      rx_lat = NAN, rx_lon = NAN;
     double      assist_km = 1500.0;  // published beacons this close get the lower detection threshold
     // Radius around the receiver: decodes are only matched to beacons inside
@@ -134,6 +135,8 @@ void usage(const char *argv0)
         "Beacon database:\n"
         "  --navaids FILE     OurAirports navaids.csv (default: next to the binary, then\n"
         "                     /usr/local/share/ubersdr_ndb/navaids.csv)\n"
+        "  --rww FILE         RXX's active NDBs (tools/fetch_rww.sh), merged in for beacons\n"
+        "                     OurAirports lacks (default: rww_ndb.csv beside the navaids file)\n"
         "  --lat DEG --lon DEG  receiver position (default: from UberSDR /api/description)\n"
         "  --assist-km KM     published beacons within KM get a lower detection threshold\n"
         "                     (default: 1500, 0 = off)\n"
@@ -231,6 +234,7 @@ bool parse_args(int argc, char **argv, Options &o)
         else if (a == "--visit-timeout") o.dec.visit_timeout_s = atof(next("--visit-timeout").c_str());
         else if (a == "--ident-copies") o.dec.visit_copies = atoi(next("--ident-copies").c_str());
         else if (a == "--navaids")      o.navaids_path = next("--navaids");
+        else if (a == "--rww")          o.rww_path = next("--rww");
         else if (a == "--lat")          o.rx_lat = atof(next("--lat").c_str());
         else if (a == "--lon")          o.rx_lon = atof(next("--lon").c_str());
         else if (a == "--assist-km")    o.assist_km = atof(next("--assist-km").c_str());
@@ -1948,6 +1952,16 @@ int main(int argc, char **argv)
         fprintf(stderr, "navaids: %zu NDBs from %s\n", app.navaids.size(), o.navaids_path.c_str());
     else
         fprintf(stderr, "warning: no navaid database at %s — beacons will not be named\n", o.navaids_path.c_str());
+    if (o.rww_path.empty()) {
+        auto slash = o.navaids_path.find_last_of('/');
+        o.rww_path = (slash == std::string::npos ? std::string(".") : o.navaids_path.substr(0, slash)) + "/rww_ndb.csv";
+    }
+    const int rww = app.navaids.merge_rww(o.rww_path);
+    if (rww >= 0)
+        fprintf(stderr, "navaids: %d more from %s (%zu in all)\n", rww, o.rww_path.c_str(), app.navaids.size());
+    else
+        fprintf(stderr, "warning: no RXX list at %s — beacons missing from OurAirports will not be named\n",
+                o.rww_path.c_str());
 
     if (std::isfinite(o.rx_lat) && std::isfinite(o.rx_lon)) {
         app.rx.have_pos = true;

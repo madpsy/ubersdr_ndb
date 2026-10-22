@@ -1,8 +1,11 @@
-// navaids.h — the OurAirports NDB list, for naming what the decoder hears.
+// navaids.h — the published NDB list, for naming what the decoder hears.
 //
-// Source: https://davidmegginson.github.io/ourairports-data/navaids.csv
-// (public domain). The Docker build downloads it into the image; ./build.sh
-// fetches it next to the binary. Only NDB and NDB-DME rows are kept.
+// Sources, both downloaded into the image when it is built (./build.sh
+// fetches them next to the binary):
+//   - OurAirports, https://davidmegginson.github.io/ourairports-data/navaids.csv
+//     (public domain): the NDB and NDB-DME rows;
+//   - RXX's active NDBs (tools/fetch_rww.sh), merged in for the beacons
+//     OurAirports lacks — NQY on 347 kHz, OSA on 351, OL on 339 at EI4HQ.
 //
 // Two uses:
 //   - candidates(): every published NDB within a few hundred Hz of a carrier,
@@ -36,6 +39,10 @@ class NavaidDb {
 public:
     // Returns false (and leaves the db empty) if the file cannot be read.
     bool load(const std::string &path);
+    // Add RXX's active NDBs (rww_ndb.csv) that have a position and that the
+    // list lacks: OurAirports' entry stands for the same ident within a kHz.
+    // Returns how many were added, -1 if the file cannot be read.
+    int merge_rww(const std::string &path);
 
     size_t size() const { return navs_.size(); }
     const std::vector<Navaid> &all() const { return navs_; }

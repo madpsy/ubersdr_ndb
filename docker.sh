@@ -61,6 +61,7 @@ stage_context() {
               --exclude='/build-*' \
               --exclude='/IXWebSocket' \
               --exclude='/navaids.csv' \
+              --exclude='/rww_ndb.csv' \
               --exclude='.git' \
               "$SCRIPT_DIR/" "$TMPCTX/"
 }

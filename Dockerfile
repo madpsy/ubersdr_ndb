@@ -27,6 +27,12 @@ RUN git clone --depth 1 https://github.com/machinezone/IXWebSocket.git /ixwebsoc
 RUN curl -fsSL -o /navaids.csv https://davidmegginson.github.io/ourairports-data/navaids.csv \
     && head -1 /navaids.csv | grep -q frequency_khz
 
+# RXX's active NDBs, merged in for the beacons OurAirports lacks. Fetched here,
+# when we build the image, so users' addons never call RXX themselves. The
+# script fails on anything but the full CSV, and so does the build.
+COPY tools/fetch_rww.sh /fetch_rww.sh
+RUN /fetch_rww.sh /rww_ndb.csv
+
 WORKDIR /src
 COPY CMakeLists.txt .
 COPY third_party/ ./third_party/
@@ -58,6 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=ndb-builder /src/build/ubersdr_ndb /usr/local/bin/ubersdr_ndb
 COPY --from=ndb-builder /navaids.csv /usr/local/share/ubersdr_ndb/navaids.csv
+COPY --from=ndb-builder /rww_ndb.csv /usr/local/share/ubersdr_ndb/rww_ndb.csv
 COPY static/ /usr/local/share/ubersdr_ndb/static/
 
 # Copy entrypoint script (translates env vars to ubersdr_ndb flags)
