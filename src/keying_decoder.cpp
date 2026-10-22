@@ -21,6 +21,8 @@ constexpr size_t kMarksNeeded = 6;
 constexpr double kMinDitMs    = 50.0;    // 24 wpm
 constexpr double kMaxDitMs    = 250.0;   // ~5 wpm
 constexpr size_t kQualityOver = 20;      // marks judged for timing quality
+constexpr size_t kGapsKept    = 30;      // letter-ending spaces kept for the word gap
+constexpr size_t kGapsNeeded  = 8;
 constexpr int    kLaneW[]     = {2, 4, 6, 8};   // lane envelope windows, 10 ms blocks
 constexpr size_t kMaxTones    = 3;       // candidate tones followed at once
 // Pitch search. The spectra (4 s each) are averaged over ~40 s, and peaks are
@@ -305,11 +307,12 @@ void KeyingDecoder::lane_sample(Lane &l, float e)
     ++l.run;
     if (on == l.on) {
         l.pending = 0;
-        // A letter is complete once the silence after it is long enough;
-        // don't wait for the next mark, which for an NDB may be seconds away.
+        // A letter is complete once the silence after it is long enough, and
+        // the word once it reaches the word gap; don't wait for the next
+        // mark, which for an NDB may be seconds away.
         if (!l.on && l.dit_ms > 0 && l.run * kEnvMs >= 5.0 * l.dit_ms) {
-            if (!l.code.empty()) flush_letter(l, true);
-            else if (l.in_word) {
+            if (!l.code.empty()) flush_letter(l, false);
+            else if (l.in_word && l.run * kEnvMs >= l.word_gap_ms()) {
                 l.in_word = false;
                 if (&l == &lane() && on_text) on_text(" ");
             }
@@ -378,8 +381,30 @@ void KeyingDecoder::end_mark(Lane &l, double ms)
 
 void KeyingDecoder::end_space(Lane &l, double ms)
 {
-    if (l.dit_ms <= 0 || l.code.empty()) return;
-    if (ms >= 2.0 * l.dit_ms) flush_letter(l, ms >= 5.0 * l.dit_ms);
+    if (l.dit_ms <= 0) return;
+    // The word gap: just over this beacon's own letter spacing, taken as the
+    // lower quartile of its recent letter-ending spaces. CML on 387 kHz and
+    // FOY on 395 space their letters 5-6 dits; OK on 398 spaces its letters
+    // 3-4 but sends a lone E 5-6 dits before them, which is a word of its
+    // own. Only the beacon's own spacing tells those apart. Spaces under 2.5
+    // dits are left out (the smoothed envelope stretches some gaps inside a
+    // letter to 2 dits), and it is learned only when there are clearly longer
+    // gaps to separate from — a one-letter ident's are all alike. Never under
+    // 4.5 dits, which a book-spaced beacon's 3-dit letter gaps stay clear of
+    // even when fading stretches them.
+    if (ms >= 2.5 * l.dit_ms) {
+        l.gaps.push_back(ms);
+        if (l.gaps.size() > kGapsKept) l.gaps.pop_front();
+        l.word_ms = 0.0;
+        if (l.gaps.size() >= kGapsNeeded) {
+            std::vector<double> g(l.gaps.begin(), l.gaps.end());
+            std::sort(g.begin(), g.end());
+            const double q25 = g[g.size() / 4], q90 = g[g.size() * 9 / 10];
+            if (q90 >= 2.5 * q25) l.word_ms = std::max(4.5 * l.dit_ms, 1.25 * q25);
+        }
+    }
+    if (l.code.empty()) return;
+    if (ms >= 2.0 * l.dit_ms) flush_letter(l, ms >= l.word_gap_ms());
 }
 
 void KeyingDecoder::flush_letter(Lane &l, bool word)

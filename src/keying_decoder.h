@@ -25,8 +25,11 @@
 //     where dah/dit is 2-4.5.
 //
 // Classification is then textbook: mark < 2 dits is a dit, else a dah; a
-// space of 2-5 dits ends a letter, 5+ ends a word (and an NDB's inter-ident
-// gap is always a word gap).
+// space of 2+ dits ends a letter, and a word gap ends the ident. By the book
+// letters are 3 dits apart and words 7, so 5 would split them — but some
+// beacons space their letters wider: CML on 387 kHz and FOY on 395 leave 5-6
+// dits between letters, and at 5 copied as "C M L" and "F O Y". So each lane
+// learns the word gap, just over the beacon's own letter spacing (end_space).
 //
 // A fade or a noise spike inside a dah would split it in two, so a change of
 // state only counts once it has lasted ~30% of a dit (debounce); the run
@@ -57,6 +60,7 @@
 #include "dsp.h"
 #include "fft.h"
 
+#include <algorithm>
 #include <array>
 #include <deque>
 #include <functional>
@@ -122,6 +126,11 @@ private:
         std::string code;
         std::vector<double> letter;   // this letter's mark lengths, ms
         bool in_word = false;   // letters emitted since the last word gap
+        std::deque<double> gaps;      // recent spaces of 2.5+ dits, ms
+        double word_ms = 0.0;   // learned word gap; 0 until learned
+
+        // A space at least this long ends a word.
+        double word_gap_ms() const { return word_ms > 0 ? word_ms : 5.0 * dit_ms; }
 
         bool keying() const { return gate && dit_ms > 0 && quality >= kMinQuality; }
         // Keying, at a speed this lane's window is short enough for.
