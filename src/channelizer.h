@@ -5,7 +5,7 @@
 // itself, so its cost was paid at the full IQ rate, once per channel. The bank
 // instead splits the stream once into subbands 3 kHz apart, each sampled at
 // 12 kHz (4x oversampled) and flat over about ±4.9 kHz; a channel reads the
-// one subband its carrier is nearest the centre of, and its ±1.3 kHz lies
+// one subband its carrier is nearest the centre of, and its ±1.5 kHz lies
 // flat inside it wherever the carrier falls. Per input sample the bank costs
 // six multiply-adds a component and a share of a small FFT, whatever the
 // number of channels; a channel then works at 12 kHz rather than 192.

@@ -5,7 +5,7 @@
 //   wideband IQ (fs) ──► Channelizer (shared by the stream): the 3 kHz-spaced
 //                        subband nearest the carrier, at 12 kHz
 //                    ──► rotator: carrier → DC
-//                    ──► FIR ↓3 to 4 kHz          (±1.3 kHz channel)
+//                    ──► FIR ↓3 to 4 kHz          (±1.1 kHz channel)
 //                    ──► |z|  AM envelope, normalised by the carrier level
 //                    ──┬► KeyingDecoder (NDB-specific; the copy shown)  ─┐
 //                      │    └► FoldDecoder (the ident averaged over       ─┤

@@ -469,7 +469,7 @@ struct ChanOut {
 };
 
 // A channel within a kHz or so of a strong beacon can hear that beacon's
-// keying: its ±1.3 kHz passband takes in the neighbour's carrier, and the AM
+// keying: its ±1.1 kHz passband takes in the neighbour's tone sideband, and the AM
 // detector turns their beat into a copy of the neighbour's tone. (GLW, 331 kHz,
 // copies this way on a carrier at 329.9.) So an ident that matches nothing on
 // its own frequency, but is exactly the ident of a beacon published within

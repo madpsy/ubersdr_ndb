@@ -11,7 +11,8 @@ namespace ndb {
 
 namespace {
 
-constexpr double kPassHz      = 1300.0;   // channel half-bandwidth kept
+constexpr double kPassHz      = 1100.0;   // channel half-bandwidth kept flat
+constexpr double kStopHz      = 1500.0;   // ... and stopped from here
 constexpr size_t kTextMax     = 400;      // decoded text kept per channel
 // The ident tally looks back an hour. A strong beacon is identified within a
 // minute either way; the long window is for weak ones, which may give one
@@ -41,11 +42,16 @@ NdbChannel::NdbChannel(int id, double center_hz, double offset_hz, const Channel
     band_ = bank_.subband_for(offset_hz, &rel);
     rot_.set(rel, bank_.out_rate());
 
-    // The subband (12 kHz) → 4 kHz. Anything above 4000-1300 = 2700 Hz would
-    // fold back into ±1300, so that is the stopband edge.
+    // The subband (12 kHz) → 4 kHz. A 1020 Hz tone's sidebands need ±1.1 kHz
+    // flat; the stopband starts at 1.5 kHz, well short of the 2.7 kHz that
+    // would fold back into ±1.3. Closer than it need be for aliasing, because
+    // the AM detector is only as good as the carrier's dominance of the
+    // channel: KER on 334 kHz, at EI4HQ, has a carrier 12 dB stronger 1.68
+    // kHz above it. With the old stopband at 2.7 kHz (−6 dB at 2 kHz) that
+    // carrier passed nearly whole, the envelope followed it, and KER's 400 Hz
+    // tone came out 3 dB above the noise. 165 taps rather than 49.
     const double fsb = bank_.out_rate();
-    const double stop = kAudioRate - kPassHz;
-    dec_ = Decimator(design_lowpass(taps_for(stop - kPassHz, fsb), 0.5 * (kPassHz + stop), fsb),
+    dec_ = Decimator(design_lowpass(taps_for(kStopHz - kPassHz, fsb), 0.5 * (kPassHz + kStopHz), fsb),
                      int(std::lround(fsb / kAudioRate)));
 
     dc_alpha_ = float(1.0 - std::exp(-1.0 / (1.0 * kAudioRate)));

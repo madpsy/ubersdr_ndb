@@ -26,7 +26,7 @@ NdbDecoder  ─ carrier seen on 2 passes → channel; drifting carrier → retun
 Channelizer (one per stream) ─ polyphase filter bank: 3 kHz subbands at 12 kHz
         ▼
 NdbChannel (one per beacon)
-   its carrier's subband → rotate carrier to DC → FIR ↓3 to 4 kHz (±1.3 kHz)
+   its carrier's subband → rotate carrier to DC → FIR ↓3 to 4 kHz (±1.1 kHz, stopped by 1.5)
    → AM envelope ÷ carrier level → 4th-order 250 Hz high-pass
    ├→ KeyingDecoder (NDB-specific: the copy shown)   ─┐
    │    └→ FoldDecoder (the ident averaged over       ─┤
@@ -262,5 +262,5 @@ Known gaps, roughly in order of payoff:
 
 - **Unkeyed carriers.** At the test site, most of the carriers without an ident sit on exact kHz, and each one's strongest "sideband" is its neighbour 1 kHz away. That's an unmodulated spur comb (local RFI), not NDBs. The UI marks a carrier "no keying" after a minute below 15 dB tone contrast with no ident cycle. Recognising the comb in the detector would stop it using channels at all.
 - **A1A (keyed-carrier) beacons** demodulate to a keyed DC step that ggmorse can't see. Detect it and switch the channel to a BFO (see the TODO in `ndb_channel.cpp`).
-- **Channel filter.** It's a fixed ±1.3 kHz. Narrowing it to the carrier and the found tone would let beacons closer than 2.5 kHz to a strong one be decoded instead of suppressed.
+- **Channel filter.** It's a fixed ±1.1 kHz, stopped by 1.5 kHz (KER on 334 kHz, at EI4HQ, needs a carrier 12 dB stronger 1.68 kHz away kept out). A neighbour inside that still takes over the AM detector; synchronous detection, or narrowing to the carrier and the found tone, would let beacons closer than that to a strong one be decoded.
 - **Unidentified carriers on exact kHz** (344, 352, 361 … kHz) that never copy are probably not all NDBs. A "never copied in N hours" state would tidy the table.
