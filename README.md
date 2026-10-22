@@ -51,7 +51,7 @@ Most NDBs are A2A: a continuous carrier with the ident keyed as a 400 or 1020 Hz
 
 **KeyingDecoder** (`src/keying_decoder.*`) is written for how NDBs key: a machine sending the same letters at a fixed speed and level, with a long silence between repetitions. It learns the things that don't change, over a span long enough to include both keying and silence:
 
-- the tone: of the three strongest lines in a spectrum averaged over ~40 s and summed over ±1 Hz (so a weak keyed tone, its power spread over its keying sidebands, isn't outshone by single noise bins), the one that is keyed (a steady beat against a neighbouring carrier can be stronger than the tone itself);
+- the tone: of the three strongest lines in a spectrum averaged over ~40 s and summed over ±1 Hz (so a weak keyed tone, its power spread over its keying sidebands, isn't outshone by single noise bins), the one that is keyed (a steady beat against a neighbouring carrier can be stronger than the tone itself), counting only lines that are the beacon's own AM: within 10 dB as strong below the carrier as above it in the channel's IQ (a neighbour's sideband, or a spur carrier, is on one side only — CML's 1072 Hz sideband in CDF's channel, a spur 678 Hz above OSA);
 - the on/off threshold, from the last 20 s of tone envelope: on at 50% of the way from floor to peak, off at 40%;
 - the dit length, from the last 60 marks.
 
@@ -267,5 +267,5 @@ Known gaps, roughly in order of payoff:
 
 - **Unkeyed carriers.** At the test site, most of the carriers without an ident sit on exact kHz, and each one's strongest "sideband" is its neighbour 1 kHz away. That's an unmodulated spur comb (local RFI), not NDBs. The UI marks a carrier "no keying" after a minute below 15 dB tone contrast with no ident cycle. Recognising the comb in the detector would stop it using channels at all.
 - **A1A (keyed-carrier) beacons** demodulate to a keyed DC step that ggmorse can't see. Detect it and switch the channel to a BFO (see the TODO in `ndb_channel.cpp`).
-- **Channel filter.** It's a fixed ±1.1 kHz, stopped by 1.5 kHz (KER on 334 kHz, at EI4HQ, needs a carrier 12 dB stronger 1.68 kHz away kept out). A neighbour inside that still takes over the AM detector; synchronous detection, or narrowing to the carrier and the found tone, would let beacons closer than that to a strong one be decoded.
+- **Channel filter.** It's a fixed ±1.1 kHz, stopped by 1.5 kHz (KER on 334 kHz, at EI4HQ, needs a carrier 12 dB stronger 1.68 kHz away kept out). A neighbour inside that still takes over the AM detector; synchronous detection (ECSS-style, on the cleaner sideband), or narrowing to the carrier and the found tone, would let beacons closer than that to a strong one be decoded.
 - **Unidentified carriers on exact kHz** (344, 352, 361 … kHz) that never copy are probably not all NDBs. A "never copied in N hours" state would tidy the table.

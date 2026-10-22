@@ -150,6 +150,7 @@ private:
     // ggmorse and the audio queued for it.
     std::unique_ptr<GGMorse> ggm_;
     std::vector<float> audio_;       // this call's audio, for the keying decoder
+    std::vector<cf>    iq_;          // ... and the IQ it came from (carrier at DC)
     std::vector<float> ggm_audio_;   // band-passed audio queued for ggmorse
     size_t ggm_read_ = 0;
     // ggmorse is handed what the keying decoder has learned: audio narrowed

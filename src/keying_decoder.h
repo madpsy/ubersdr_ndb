@@ -16,7 +16,13 @@
 //     spectrum, the one that is keyed. Each is mixed to DC and its on/off
 //     contrast measured; a steady line (a beat against a neighbouring carrier,
 //     a spur) has almost none. GLW on 331 kHz sits 1.1 kHz from another
-//     carrier, and their steady 1.1 kHz beat is stronger than its 400 Hz tone;
+//     carrier, and their steady 1.1 kHz beat is stronger than its 400 Hz tone.
+//     A line that is keyed, but by another beacon, has contrast too, so with
+//     the channel's IQ a line counts only if it is the beacon's own AM: as
+//     strong (within 10 dB) at the carrier minus its pitch as at plus. A
+//     neighbour's sideband, or a spur carrier, is on one side only. CDF on
+//     388.5 kHz, at EI4HQ, hears CML's 1072 Hz upper sideband 21 dB stronger
+//     below the carrier than above, and 6 dB over its own 400 Hz tone;
 //   - the tone envelope: the audio mixed to DC at the tone, summed coherently
 //     over 10 ms blocks, then over a sliding window of W blocks;
 //   - the on/off threshold: from the 20th and 97th percentiles of the last
@@ -82,7 +88,10 @@ class KeyingDecoder {
 public:
     explicit KeyingDecoder(double audio_rate);
 
-    void process(const float *a, size_t n);
+    // The AM audio, and optionally the channel's IQ it came from (carrier at
+    // DC, one sample per audio sample) for the sideband check on tones.
+    void process(const float *a, size_t n) { process(a, nullptr, n); }
+    void process(const float *a, const cf *iq, size_t n);
 
     // Decoded characters (and ' ' at word gaps), as they complete.
     std::function<void(const std::string &)> on_text;
@@ -166,6 +175,9 @@ private:
     RealFft fft_;      // its input is filled with windowed audio as it comes
     std::vector<float> fwin_;
     std::vector<float> spec_;
+    Fft cfft_;         // and the IQ's, windowed alike, for sideband symmetry
+    std::vector<float> cspec_;
+    bool have_iq_ = false;
     size_t ffill_ = 0;
     int spectra_ = 0;
     double pitch_ = 0.0;

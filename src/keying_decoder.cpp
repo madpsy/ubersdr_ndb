@@ -34,6 +34,11 @@ constexpr size_t kMaxTones    = 3;       // candidate tones followed at once
 // smoothed and longer, it holds 400 Hz.
 constexpr float  kPitchAlpha  = 0.1f;
 constexpr int    kPitchSmooth = 4;
+// A tone is the beacon's own only if its sidebands either side of the carrier
+// are within this of each other. Measured at EI4HQ: beacons' own tones 0.3-6
+// dB (CUL's 6, something else under its lower sideband); a neighbour's
+// sideband or a spur 12-34.
+constexpr float  kMaxAsymDb   = 10.0f;
 
 }  // namespace
 
@@ -80,6 +85,8 @@ KeyingDecoder::KeyingDecoder(double audio_rate)
       fft_(nfft_),
       fwin_(nfft_),
       spec_(nfft_ / 2, 0.0f),
+      cfft_(nfft_),
+      cspec_(nfft_, 0.0f),
       block_(int(std::lround(audio_rate * kEnvMs / 1000.0)))
 {
     static_assert(sizeof(kLaneW) / sizeof(kLaneW[0]) == std::tuple_size<decltype(lanes_)>::value);
@@ -100,13 +107,15 @@ void KeyingDecoder::Tone::set(double f, double fs)
     step = cf(float(std::cos(2.0 * kPi * f / fs)), float(-std::sin(2.0 * kPi * f / fs)));
 }
 
-void KeyingDecoder::process(const float *a, size_t n)
+void KeyingDecoder::process(const float *a, const cf *iq, size_t n)
 {
     for (size_t i = 0; i < n; ++i) {
         // Pitch search runs continuously, so a retuned or re-toned beacon is
         // followed.
         fft_.in()[ffill_] = a[i] * fwin_[ffill_];
+        if (iq) cfft_.data()[ffill_] = iq[i] * fwin_[ffill_];
         if (++ffill_ == nfft_) {
+            have_iq_ = iq != nullptr;
             ffill_ = 0;
             update_pitch();
         }
@@ -143,8 +152,27 @@ void KeyingDecoder::update_pitch()
     const float alpha = spectra_ == 0 ? 1.0f : kPitchAlpha;
     constexpr int kSm = kPitchSmooth;
     for (size_t k = 0; k < nfft_ / 2; ++k) spec_[k] += alpha * (std::norm(X[k]) - spec_[k]);
+    if (have_iq_) {
+        cfft_.forward();
+        const cf *Z = cfft_.data();
+        for (size_t k = 0; k < nfft_; ++k) cspec_[k] += alpha * (std::norm(Z[k]) - cspec_[k]);
+    }
     ++spectra_;
     const double bin = fs_ / double(nfft_);
+    // IQ power summed over ±kSm bins at an offset from the carrier. The
+    // carrier is the strongest bin within ±4 Hz of DC (the channel follows it,
+    // but not to the bin).
+    const long n = long(nfft_);
+    auto cbin = [&](long k) { return cspec_[size_t(((k % n) + n) % n)]; };
+    long car = 0;
+    for (long k = -long(4.0 / bin); k <= long(4.0 / bin); ++k)
+        if (cbin(k) > cbin(car)) car = k;
+    auto side = [&](double f) {
+        const long k = car + std::lround(f / bin);
+        float s = 0.0f;
+        for (long j = -kSm; j <= kSm; ++j) s += cbin(k + j);
+        return s;
+    };
     const size_t k0 = size_t(300.0 / bin), k1 = std::min(nfft_ / 2 - 2 - size_t(kSm), size_t(1200.0 / bin));
     // Peaks are looked for in the spectrum summed over ±kSm bins.
     std::vector<float> sm(spec_.size(), 0.0f);
@@ -169,6 +197,10 @@ void KeyingDecoder::update_pitch()
         bool near = false;
         for (double g : found) near = near || std::fabs(f - g) < 20.0;
         if (near) continue;
+        if (have_iq_) {
+            const float up = side(f), lo = side(-f);
+            if (up <= 0.0f || lo <= 0.0f || std::fabs(10.0f * std::log10(up / lo)) > kMaxAsymDb) continue;
+        }
         found.push_back(f);
         if (found.size() == kMaxTones) break;
     }

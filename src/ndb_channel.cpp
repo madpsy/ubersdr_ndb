@@ -153,6 +153,7 @@ void NdbChannel::process(const Channelizer &bank, double now_s)
         dc_ += dc_alpha_ * (m - dc_);
         const float a = dc_ > 1e-9f ? (m - dc_) / dc_ : 0.0f;
         on_audio(std::clamp(a, -2.0f, 2.0f));
+        iq_.push_back(y2);
     }
     run_morse();
     // A clear ident cycle counts as keying too: it is how a beacon too weak
@@ -190,7 +191,8 @@ void NdbChannel::tune_ggmorse()
 
 void NdbChannel::run_morse()
 {
-    key_.process(audio_.data(), audio_.size());
+    key_.process(audio_.data(), iq_.data(), audio_.size());
+    iq_.clear();
     if (audio_tap) audio_tap(audio_.data(), audio_.size());
     if (!ggm_) {
         audio_.clear();
