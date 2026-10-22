@@ -34,8 +34,13 @@ struct DetectorConfig {
     float  avg_alpha         = 0.25f;  // EMA weight of each new FFT frame
     int    detect_every      = 6;      // run peak search every N frames
     double peak_halfwidth_hz = 150.0;  // a carrier is the max within ±this
-    double neighbour_hz        = 2500.0; // drop peaks this close to ...
-    float  neighbour_margin_db = 15.0f;  // ... a carrier this much stronger
+    // Drop peaks this close to a carrier this much stronger. 1.5 kHz is
+    // where the channel filter stops (ndb_channel.cpp kStopHz): further out, a
+    // channel keeps the neighbour out and decodes its own beacon. BRI (414
+    // kHz), at EI4HQ, is copied cleanly beside a carrier 22 dB stronger 1.68
+    // kHz above it, and the old 2.5 kHz never gave it a channel.
+    double neighbour_hz        = 1500.0;
+    float  neighbour_margin_db = 15.0f;
 
     // Lower threshold near frequencies where a beacon is published (and near
     // enough to be heard): a weak carrier exactly where one is expected is far

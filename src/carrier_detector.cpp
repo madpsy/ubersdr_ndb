@@ -167,7 +167,7 @@ void CarrierDetector::run_detection()
             // Close to a much stronger carrier: whatever this is — sideband
             // harmonic, spur, or a genuine weak beacon — its channel would
             // only decode the strong one, whose carrier or tone sidebands fall
-            // inside its ±1.3 kHz passband or the transition band above it.
+            // inside its ±1.1 kHz passband or the transition band to 1.5 kHz.
             if (ad <= cfg_.neighbour_hz && s.level_db - c.level_db >= cfg_.neighbour_margin_db) { sideband = true; break; }
             if (ad < 250.0 || ad > 1300.0) continue;
             long mirror = long(std::lround((s.offset_hz - d) / bin)) + half;
