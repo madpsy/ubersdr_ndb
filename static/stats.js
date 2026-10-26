@@ -104,17 +104,25 @@ function sxDerive() {
   return { hod, n, far, farId, avgN, bands };
 }
 
+// api/stats, decoded: up, and each beacon's mins and snrs, as arrays with one
+// entry per slot (`step` seconds: 3600, or 900 for the history's own buckets).
+async function sxFetch(hours, step = 3600) {
+  const r = await fetch(`api/stats?hours=${hours}${step === 3600 ? '' : `&step=${step}`}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const d = await r.json();
+  d.step = d.step || 3600;
+  d.up = sxDecode(d.up);
+  for (const b of d.beacons) { b.mins = sxDecode(b.m); b.snrs = sxDecode(b.s); delete b.m; delete b.s; }
+  return d;
+}
+
 async function sxLoad() {
   const seq = ++SX.seq;
   $('stats-body').classList.add('loading');
   $('stats-status').textContent = 'Loading…';
   try {
-    const r = await fetch(`api/stats?hours=${SX.hours}`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const d = await r.json();
+    const d = await sxFetch(SX.hours);
     if (seq !== SX.seq) return;
-    d.up = sxDecode(d.up);
-    for (const b of d.beacons) { b.mins = sxDecode(b.m); b.snrs = sxDecode(b.s); delete b.m; delete b.s; }
     SX.data = d;
     sxTzButtons();
     $('stats-status').textContent = `Updated ${sxWhen(d.now)} ${SX.tz === 'UTC' ? 'UTC' : ''}`.trim();
@@ -286,19 +294,21 @@ function sxStrip(strip) {
 
 // ── CSV ─────────────────────────────────────────────────────────────────────
 
-function sxCsv(name, header, rows) {
+// Save rows as a CSV file (or TSV / semicolon-separated, with `sep`).
+function csvSave(filename, header, rows, sep = ',') {
   const cell = (v) => {
     const s = v == null ? '' : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    return s.includes(sep) || /["\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const text = [header, ...rows].map((r) => r.map(cell).join(',')).join('\r\n') + '\r\n';
+  const text = [header, ...rows].map((r) => r.map(cell).join(sep)).join('\r\n') + '\r\n';
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
-  a.download = `ndb-${name}-${SX.hours}h-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.href = URL.createObjectURL(new Blob([text], { type: sep === '\t' ? 'text/tab-separated-values' : 'text/csv' }));
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
 }
+const sxCsv = (name, header, rows) => csvSave(`ndb-${name}-${SX.hours}h-${new Date().toISOString().slice(0, 10)}.csv`, header, rows);
 
 function sxCsvTimeline(dv) {
   const d = SX.data;
@@ -352,10 +362,12 @@ function sxRender() {
   const av = heard.map((b) => b.avail).sort((a, b) => a - b);
   const median = av.length ? av[Math.floor(av.length / 2)] : null;
   const published = heard.filter((b) => b.confirmed).length + d.unheard.length;
+  const fresh = state.heard.filter((e) => e.confirmed && e.first_s >= d.t0).sort((a, b) => b.first_s - a.first_s);
   $('sx-kpis').innerHTML = `
     <div class="stat"><span class="stat-label">Beacons heard</span><span class="stat-val">${heard.length}<small> of ${published} published in range</small></span></div>
     <div class="stat"><span class="stat-label">Furthest heard</span><span class="stat-val">${far ? `${far.dist_km} km <small>${esc(far.ident)} ${flag(far.country)}</small>` : '–'}</span></div>
     <div class="stat"><span class="stat-label">Median availability</span><span class="stat-val">${sxPct(median)}<small> of the time up</small></span></div>
+    <div class="stat"><span class="stat-label">New catches</span><span class="stat-val">${fresh.length}<small> ${fresh.length ? esc(fresh.slice(0, 5).map((e) => e.ident).join(' ')) + (fresh.length > 5 ? ' …' : '') : 'first heard in this window'}</small></span></div>
     <div class="stat"><span class="stat-label">Receiver up</span><span class="stat-val">${sxPct(d.up_minutes / windowMin)}<small> ${sxDur(d.up_minutes)} of ${sxDur(windowMin)}</small></span></div>`;
 
   // Over time
@@ -379,7 +391,133 @@ function sxRender() {
   sxHeat($('sx-heat'), dv.bands, (b, h, v) =>
     `<div><b class="v">${v == null ? 'no data' : sxPct(v)}</b> of the time</div><div class="m">${esc(b.label)} · ${b.count} beacon${b.count === 1 ? '' : 's'} · ${sxHr(h)}</div>`);
 
+  sxRenderDx();
   sxRenderTable();
+}
+
+// ── DX: range by bearing, countries ─────────────────────────────────────────
+
+const SX_SECTORS = 16;
+const SX_POINTS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+const sxSector = (deg) => Math.round(deg / (360 / SX_SECTORS)) % SX_SECTORS;
+
+// Furthest beacon per sector of the compass, from a list of beacons.
+function sxFurthest(list) {
+  const out = new Array(SX_SECTORS).fill(null);
+  for (const b of list) {
+    if (b.dist_km == null || b.bearing_deg == null) continue;
+    const k = sxSector(b.bearing_deg);
+    if (!out[k] || b.dist_km > out[k].dist_km) out[k] = b;
+  }
+  return out;
+}
+
+function sxDxData() {
+  const d = SX.data;
+  const log = state.heard.filter((e) => e.confirmed);
+  const now = state.heardNow || d.now;
+  return {
+    log,
+    all: sxFurthest(log),
+    win: sxFurthest(d.beacons),
+    hour: sxFurthest(log.filter((e) => now - e.last_s < 3600)),
+  };
+}
+
+function sxRose(el, dx) {
+  el.innerHTML = '';
+  const S = Math.min(400, Math.max(260, el.clientWidth));
+  const c = S / 2, R = c - 26;
+  const svg = sxEl('svg', { width: S, height: S, viewBox: `0 0 ${S} ${S}`, class: 'sx-svg sx-rose' }, el);
+  const max = Math.max(1, ...[...dx.all, ...dx.win, ...dx.hour].map((b) => b?.dist_km || 0));
+  const { top, step } = sxNice(max);
+  const r = (km) => (km / top) * R;
+  const pt = (deg, rad) => [c + rad * Math.sin(deg * Math.PI / 180), c - rad * Math.cos(deg * Math.PI / 180)];
+  for (let v = step; v <= top + 1e-9; v += step) {
+    sxEl('circle', { cx: c, cy: c, r: r(v), class: 'sx-grid', fill: 'none' }, svg);
+  }
+  for (let k = 0; k < 8; k++) {
+    const [x1, y1] = pt(k * 45, R);
+    sxEl('line', { x1: c, y1: c, x2: x1, y2: y1, class: 'sx-grid' }, svg);
+    const [lx, ly] = pt(k * 45, R + 14);
+    sxEl('text', { x: lx, y: ly + 3, class: 'sx-tick', 'text-anchor': 'middle' }, svg).textContent = SX_POINTS[k * 2];
+  }
+  const w = 360 / SX_SECTORS;
+  const wedge = (k, rad) => {
+    const [x0, y0] = pt(k * w - w / 2, rad), [x1, y1] = pt(k * w + w / 2, rad);
+    return `M${c},${c}L${x0.toFixed(1)},${y0.toFixed(1)}A${rad.toFixed(1)},${rad.toFixed(1)} 0 0 1 ${x1.toFixed(1)},${y1.toFixed(1)}Z`;
+  };
+  for (const [layer, cls] of [[dx.all, 'all'], [dx.win, 'win'], [dx.hour, 'hour']]) {
+    layer.forEach((b, k) => { if (b) sxEl('path', { d: wedge(k, Math.max(2, r(b.dist_km))), class: `sx-wedge ${cls}` }, svg); });
+  }
+  // Ring labels over the wedges, haloed (see style.css).
+  for (let v = step; v <= top + 1e-9; v += step) {
+    sxEl('text', { x: c + 3, y: c - r(v) + 10, class: 'sx-tick' }, svg).textContent = v >= 1000 ? `${v / 1000}k km` : `${v} km`;
+  }
+  const line = (lbl, b) => `<div><span class="m">${lbl}</span> ${b ? `<b>${esc(b.ident)}</b> ${esc(b.name)} ${flag(b.country)} · ${b.dist_km} km` : '–'}</div>`;
+  for (let k = 0; k < SX_SECTORS; k++) {
+    const g = sxEl('path', { d: wedge(k, R), class: 'sx-wedge-hit', tabindex: 0 }, svg);
+    const show = (e) => sxTipAt(e, `<div class="m">${SX_POINTS[k]} · ${Math.round(k * w - w / 2 + 360) % 360}–${Math.round(k * w + w / 2)}°</div>` +
+      line('All time', dx.all[k]) + line('Window', dx.win[k]) + line('Last hour', dx.hour[k]));
+    g.addEventListener('pointermove', show);
+    g.addEventListener('pointerleave', sxTipOff);
+    g.addEventListener('focus', () => { const bb = g.getBoundingClientRect(); show({ clientX: bb.right, clientY: bb.top }); });
+    g.addEventListener('blur', sxTipOff);
+  }
+}
+
+let sxRegion = null;
+function sxCountryName(cc) {
+  try { sxRegion = sxRegion || new Intl.DisplayNames(['en'], { type: 'region' }); return sxRegion.of(cc.toUpperCase()); } catch (e) { return cc; }
+}
+
+// One row per country: beacons heard in the window and ever, the furthest
+// and the first.
+function sxCountries(dx) {
+  const d = SX.data, rows = new Map();
+  const get = (cc) => {
+    if (!rows.has(cc)) rows.set(cc, { cc, name: cc ? sxCountryName(cc) : 'Unknown', win: 0, ever: 0, fresh: 0, far: null, first: null });
+    return rows.get(cc);
+  };
+  for (const b of d.beacons) get(b.country || '').win++;
+  for (const e of dx.log) {
+    const r = get(e.country || '');
+    r.ever++;
+    if (e.first_s >= d.t0) r.fresh++;
+    if (e.dist_km != null && (!r.far || e.dist_km > r.far.dist_km)) r.far = e;
+    if (!r.first || e.first_s < r.first.first_s) r.first = e;
+  }
+  return [...rows.values()].sort((a, b) => b.ever - a.ever || b.win - a.win || a.name.localeCompare(b.name));
+}
+
+function sxRenderDx() {
+  const dx = sxDxData();
+  SX.dx = dx;
+  sxRose($('sx-rose'), dx);
+  const rows = sxCountries(dx);
+  SX.countries = rows;
+  const winN = rows.filter((r) => r.win).length;
+  $('sx-countries-hint').textContent = `${winN} in this window · ${rows.filter((r) => r.ever).length} all time`;
+  $('sx-country-rows').innerHTML = rows.length ? rows.map((r) => `<tr>
+      <td>${flag(r.cc)} ${esc(r.name)}${r.fresh ? ` <span class="badge new" title="${r.fresh} first heard in this window">+${r.fresh} new</span>` : ''}</td>
+      <td class="num">${r.win || '–'}</td><td class="num">${r.ever}</td>
+      <td>${r.far ? `<b>${esc(r.far.ident)}</b> ${r.far.dist_km} km` : '–'}</td>
+      <td>${r.first ? `<b>${esc(r.first.ident)}</b> <span class="m">${sxWhen(r.first.first_s)}</span>` : '–'}</td>
+    </tr>`).join('') : '<tr><td colspan="5" class="empty">Nothing heard yet.</td></tr>';
+}
+
+function sxCsvRose(dx) {
+  const w = 360 / SX_SECTORS;
+  const cols = (b) => (b ? [b.ident, b.name, b.country, b.dist_km] : ['', '', '', '']);
+  sxCsv('bearings',
+    ['sector', 'from_deg', 'to_deg', 'all_ident', 'all_name', 'all_country', 'all_km', 'window_ident', 'window_name', 'window_country', 'window_km',
+      'last_hour_ident', 'last_hour_name', 'last_hour_country', 'last_hour_km'],
+    SX_POINTS.map((p, k) => [p, (k * w - w / 2 + 360) % 360, k * w + w / 2, ...cols(dx.all[k]), ...cols(dx.win[k]), ...cols(dx.hour[k])]));
+}
+function sxCsvCountries(rows) {
+  sxCsv('countries',
+    ['country_code', 'country', 'heard_window', 'heard_all_time', 'new_in_window', 'furthest_ident', 'furthest_km', 'first_ident', 'first_heard_utc'],
+    rows.map((r) => [r.cc, r.name, r.win, r.ever, r.fresh, r.far?.ident ?? '', r.far?.dist_km ?? '', r.first?.ident ?? '', r.first ? sxIso(r.first.first_s) : '']));
 }
 
 function sxRows() {
@@ -398,6 +536,8 @@ function sxRows() {
   return rows;
 }
 
+const sxFresh = (key) => { const e = state.heard.find((x) => x.key === key); return e && e.first_s >= SX.data.t0; };
+
 function sxRenderTable() {
   const rows = sxRows();
   SX.rows = rows;
@@ -414,7 +554,7 @@ function sxRenderTable() {
   $('sx-rows').innerHTML = rows.map((b) => {
     const open = b.key === SX.open;
     const main = `<tr data-key="${esc(b.key)}" class="${b.heard ? 'sx-row' : 'sx-unheard'}${open ? ' sel' : ''}">
-      <td class="ident">${esc(b.ident)}</td>
+      <td class="ident">${esc(b.ident)}${b.heard && sxFresh(b.key) ? '<span class="badge new" title="First heard in this window">NEW</span>' : ''}</td>
       <td class="station">${esc(b.name || '—')}<span class="cc">${flag(b.country)} ${esc(b.country || '')}</span></td>
       <td class="freq">${(b.freq_hz / 1e3).toFixed(1)}</td>
       <td class="num">${b.dist_km != null ? `${b.dist_km} km` : '–'}<span class="brg">${b.bearing_deg != null ? compass(b.bearing_deg) : ''}</span></td>
@@ -492,6 +632,8 @@ $('sx-rows').addEventListener('click', (e) => {
 $('sx-csv-time').addEventListener('click', () => SX.dv && sxCsvTimeline(SX.dv));
 $('sx-csv-hod').addEventListener('click', () => SX.dv && sxCsvHourOfDay(SX.dv));
 $('sx-csv-beacons').addEventListener('click', () => SX.rows && sxCsvBeacons(SX.rows));
+$('sx-csv-rose').addEventListener('click', () => SX.dx && sxCsvRose(SX.dx));
+$('sx-csv-countries').addEventListener('click', () => SX.countries && sxCsvCountries(SX.countries));
 let sxResize = null;
 addEventListener('resize', () => {
   if ($('stats-modal').hidden) return;
@@ -500,4 +642,7 @@ addEventListener('resize', () => {
 });
 // #stats opens it straight away (a link to share, or a bookmark).
 if (location.hash === '#stats') openStats();
+
+// What timeline.js and export.js share.
+Object.assign(window.ndb, { fetchStats: sxFetch, csvSave, isoTime: sxIso });
 })();

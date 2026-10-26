@@ -177,6 +177,14 @@ Plain `iq` (10 kHz) is not supported. It is too narrow to be worth it, and the c
 
 **Reception stats** (the Stats button, or `#stats` on the URL): beacons heard per hour and the furthest heard per hour, over 24 hours, 7 or 30 days; by hour of day, the average heard at once and, per distance band, the share of time its beacons were heard — where skywave opening up at night shows; and every beacon, least heard first, with its availability, SNR and a 24-cell hour-of-day strip, plus the published beacons never heard. Hour of day is UTC or the receiver's own time zone (from UberSDR's `/api/description`). Each section downloads as CSV.
 
+The stats view's DX section has a rose of the furthest beacon heard in each of 16 compass sectors (all time, in the window, and in the last hour) and a tally by country: beacons heard in the window and ever, how many are new, and the furthest and first from each. Both download as CSV.
+
+**New and rare catches**: a beacon first heard in the last day gets a NEW badge, and one heard now that the last 30 days say is rarely heard (under 5% of the time the receiver was up, overall or at this hour of day, leaving out the last 3 hours so an opening in progress doesn't count against itself) gets RARE. Both raise an alert on the page; the Notify button adds desktop notifications. MQTT already sends a `new` event for a first catch.
+
+**Timeline and day/night** (the map's ▶ Timeline button): replays the last 24 hours to 30 days of history on the map, 15 minutes at a time — beacons light up in their SNR colour with a path to the receiver while heard, and fade over the following hour. A strip under the slider shows how many were heard in each slot, on a band coloured by the light at the receiver. The map shades night and the greyline (the sun within 6° of the horizon) for the time shown, live or replayed.
+
+**Export** (the Export button): reception history as CSV (or semicolon-separated, or TSV) — one row per beacon per 15 minutes or per hour heard, one per beacon with its minutes heard and availability split by day / greyline / night, or one per 15 minutes with every beacon heard in it. Each row has the sun's elevation and day / greyline / night at the receiver, at the beacon and at the path's midpoint; the `light` column (and the summary's split) is judged at whichever of those you choose, with "mixed" for a path from daylight into darkness. Filter by window, light, beacon (idents, names, countries, kHz) and distance.
+
 History is sampled once a minute into 15-minute buckets and kept 30 days in `DATA_DIR/history.tsv`, which is rewritten daily without expired buckets, so it stays bounded (a few MB); `heard.tsv` is capped at 2000 beacons.
 
 | Endpoint | |
@@ -186,7 +194,7 @@ History is sampled once a minute into 15-minute buckets and kept 30 days in `DAT
 | `GET /api/status` | streams, receiver, every channel with its navaid match and candidates |
 | `GET /api/spectrum` | averaged spectrum + floor per stream (2048 points) |
 | `GET /api/beacons?max_age=300` | **for polling:** identified beacons heard in the last `max_age` seconds (1–604800, default 300; anything else is a `400`), most recent first, with position, distance, first/last heard, `last_identified` (the last copy of the ident; `last_heard` also counts its carrier between revisits), best SNR, and current SNR if live |
-| `GET /api/stats?hours=168` | reception history for the stats view (1–720 hours, default 168): minutes heard and mean SNR per beacon per hour, receiver uptime per hour, and the published beacons in band and radius not heard. Per-hour values are strings of one base64 character per hour (0–63), first hour `t0`. |
+| `GET /api/stats?hours=168` | reception history for the stats view (1–720 hours, default 168): minutes heard and mean SNR per beacon per hour, receiver uptime per hour, and the published beacons in band and radius not heard. Per-hour values are strings of one base64 character per hour (0–63), first hour `t0`. `&step=900` gives 15-minute slots instead (4 per hour, `step` in the response). Beacons carry `lat`/`lon`, the response the receiver's `rx_lat`/`rx_lon`. |
 | `GET /api/heard` | heard log |
 | `GET /api/decodes` | recent live copy |
 | `GET /api/navaids?max_km=…` | published NDBs in the covered band (default radius `NDB_RADIUS_KM`) |

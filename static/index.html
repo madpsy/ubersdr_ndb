@@ -30,11 +30,20 @@
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M2 14V9M6 14V5M10 14V8M14 14V2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
     Stats
   </button>
+  <button id="export-open" class="btn" title="Download reception history as CSV, with day / night / greyline for each reception">
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 2v8M4.5 6.5 8 10l3.5-3.5M2.5 13.5h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    Export
+  </button>
   <label class="toggle" title="Hide carriers with no decoded ident">
     <input type="checkbox" id="ident-only"> Identified only
   </label>
+  <button id="notify-btn" class="btn" title="Desktop notifications for new and rare catches">
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4 11V7a4 4 0 0 1 8 0v4l1.5 1.5h-11L4 11ZM6.5 14a1.5 1.5 0 0 0 3 0" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+    Notify
+  </button>
   <span id="status" class="status-err">Connecting…</span>
 </header>
+<div id="toasts" aria-live="polite"></div>
 
 <section id="stats">
   <div class="stat"><span class="stat-label">Carriers</span><span class="stat-val" id="st-carriers">–</span></div>
@@ -93,8 +102,32 @@
       <label class="toggle small" title="Published NDBs in the covered band that have never been heard">
         <input type="checkbox" id="show-unheard" checked> Unheard
       </label>
+      <label class="toggle small" title="Shade night, and the greyline (sun within 6° of the horizon)">
+        <input type="checkbox" id="show-daynight" checked> Day/night
+      </label>
+      <button class="btn small" id="tl-open" title="Replay the reception history on the map, 15 minutes at a time">▶ Timeline</button>
     </div>
     <div id="map"></div>
+    <div id="tl-bar" hidden>
+      <button class="btn small" id="tl-play" title="Play (space)">▶</button>
+      <div id="tl-track">
+        <canvas id="tl-strip"></canvas>
+        <input type="range" id="tl-slider" min="0" max="0" value="0" aria-label="Time">
+      </div>
+      <div id="tl-time"></div>
+      <div id="tl-opts">
+        <select id="tl-range" title="How far back to replay">
+          <option value="24" selected>24 h</option><option value="72">3 days</option>
+          <option value="168">7 days</option><option value="720">30 days</option>
+        </select>
+        <select id="tl-speed" title="Replay speed">
+          <option value="2">30 min/s</option><option value="4">1 h/s</option><option value="8" selected>2 h/s</option>
+          <option value="16">4 h/s</option><option value="32">8 h/s</option>
+        </select>
+        <label class="toggle small" title="Fade beacons out over the hour after they were last heard"><input type="checkbox" id="tl-trail" checked> Trail</label>
+        <button class="btn small" id="tl-close" title="Back to the live map">Live</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -173,6 +206,28 @@
         </section>
 
         <section class="sx-sec">
+          <div class="sx-sec-head"><h3>DX</h3><span class="hint">all time is the whole heard log</span>
+            <button class="btn small" id="sx-csv-rose">Bearings CSV</button>
+            <button class="btn small" id="sx-csv-countries">Countries CSV</button></div>
+          <div class="sx-dx">
+            <div class="sx-rose-wrap">
+              <div class="sx-chart-title">Furthest heard by bearing
+                <span class="sx-rose-key"><i class="all"></i>all time <i class="win"></i>this window <i class="hour"></i>last hour</span></div>
+              <div id="sx-rose"></div>
+            </div>
+            <div class="sx-countries-wrap">
+              <div class="sx-chart-title">Countries <span class="hint" id="sx-countries-hint"></span></div>
+              <div class="sx-table-wrap">
+                <table id="sx-countries">
+                  <thead><tr><th>Country</th><th class="num">Window</th><th class="num">All time</th><th>Furthest</th><th>First heard</th></tr></thead>
+                  <tbody id="sx-country-rows"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sx-sec">
           <div class="sx-sec-head"><h3>Beacons</h3><span class="hint">least heard first · click a row for its SNR over time</span>
             <label class="toggle small"><input type="checkbox" id="sx-include-unheard"> <span>Include never heard (<span id="sx-unheard-n">0</span>)</span></label>
             <button class="btn small" id="sx-csv-beacons">CSV</button></div>
@@ -193,13 +248,76 @@
   </div>
 </div>
 
+<div id="export-modal" class="modal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-box export-box" role="dialog" aria-modal="true" aria-labelledby="export-title">
+    <div class="modal-head">
+      <h2 id="export-title">Export CSV</h2>
+      <span class="hint">reception history, kept 30 days</span>
+      <button class="modal-x" data-close title="Close (Esc)">✕</button>
+    </div>
+    <form id="export-form" class="ex-form">
+      <label class="ex-field ex-wide">Rows
+        <select id="ex-mode">
+          <option value="slots" selected>Receptions — one per beacon per 15 min it was heard</option>
+          <option value="hourly">Hourly — one per beacon per hour it was heard</option>
+          <option value="summary">Beacon summary — one per beacon, minutes heard by day / greyline / night</option>
+          <option value="timeline">Timeline — one per 15 min, with every beacon heard in it</option>
+        </select>
+      </label>
+      <label class="ex-field">Window
+        <select id="ex-hours">
+          <option value="6">6 h</option><option value="24">24 h</option><option value="72">3 days</option>
+          <option value="168" selected>7 days</option><option value="720">30 days</option>
+        </select>
+      </label>
+      <label class="ex-field" id="ex-ref-wrap" title="Where the 'light' column — and the summary's split — is judged. The other positions are in their own columns either way.">Day / night judged at
+        <select id="ex-ref">
+          <option value="path" selected>Both ends of the path</option>
+          <option value="mid">Path midpoint</option>
+          <option value="rx">Receiver</option>
+          <option value="ndb">Beacon</option>
+        </select>
+      </label>
+      <fieldset class="ex-field ex-wide" id="ex-lights"><legend>Include</legend>
+        <label class="toggle small"><input type="checkbox" value="day" checked> Day</label>
+        <label class="toggle small"><input type="checkbox" value="greyline" checked> Greyline</label>
+        <label class="toggle small"><input type="checkbox" value="night" checked> Night</label>
+        <label class="toggle small" title="One end of the path in daylight, the other in darkness"><input type="checkbox" value="mixed" checked> Mixed path</label>
+      </fieldset>
+      <label class="ex-field ex-wide">Beacons
+        <input id="ex-q" type="text" placeholder="All — or idents, names, countries, kHz, comma-separated (e.g. OL, KER, 388)" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="ex-field">Min km <input id="ex-min" type="number" min="0" step="10" placeholder="any"></label>
+      <label class="ex-field">Max km <input id="ex-max" type="number" min="0" step="10" placeholder="any"></label>
+      <label class="ex-field">Separator
+        <select id="ex-sep">
+          <option value="comma" selected>Comma</option><option value="semicolon">Semicolon (Excel, EU locales)</option><option value="tab">Tab (TSV)</option>
+        </select>
+      </label>
+      <div class="ex-field ex-checks">
+        <label class="toggle small"><input type="checkbox" id="ex-local"> Receiver local time column</label>
+        <label class="toggle small" id="ex-unheard-wrap"><input type="checkbox" id="ex-unheard"> Include published beacons not heard</label>
+      </div>
+      <div class="ex-foot ex-wide">
+        <span class="hint">Greyline: sun within 6° of the horizon · night: more than 6° below. Sun elevations are in their own columns to reclassify as you like.</span>
+      </div>
+      <div class="ex-wide ex-preview-head"><span id="ex-meta"></span><button class="btn" id="ex-save" type="submit">Download</button></div>
+    </form>
+    <div id="ex-preview"></div>
+  </div>
+</div>
+
 <p class="footnote">Beacon data: <a href="https://ourairports.com/data/" target="_blank" rel="noopener">OurAirports</a> (public domain).
 Morse: <a href="https://github.com/ggerganov/ggmorse" target="_blank" rel="noopener">ggmorse</a>.
-API: <a href="api/beacons?max_age=300" target="_blank" rel="noopener"><code>api/beacons?max_age=300</code></a> — beacons heard in the last <i>max_age</i> seconds (1–604800), as JSON; <a href="api/stats?hours=24" target="_blank" rel="noopener"><code>api/stats?hours=24</code></a> — reception history (1–720 h).
+API: <a href="api/beacons?max_age=300" target="_blank" rel="noopener"><code>api/beacons?max_age=300</code></a> — beacons heard in the last <i>max_age</i> seconds (1–604800), as JSON; <a href="api/stats?hours=24" target="_blank" rel="noopener"><code>api/stats?hours=24</code></a> — reception history (1–720 h; <code>&amp;step=900</code> for 15-minute slots).
 ✓ decoded ident matches the published beacon · ≈ matches all but the last letter · <i>italic</i> = unconfirmed nearest candidate.</p>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script src="app.js"></script>
 <script src="stats.js"></script>
+<script src="timeline.js"></script>
+<script src="export.js"></script>
+<script src="alerts.js"></script>
 </body>
 </html>

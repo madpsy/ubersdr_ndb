@@ -22,6 +22,7 @@ const state = {
   identOnly: false,
   heard: [],            // server-side heard log
   heardNow: 0,
+  timeline: false,      // the map is replaying history (timeline.js), not showing live
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -136,6 +137,7 @@ function renderTable() {
     else if (id.kind === 'near') identCell = `${esc(id.label)}<span class="badge near" title="Decoded ${esc(c.ident)} — all but the last letter">≈</span>`;
     else if (id.kind === 'decoded') identCell = `${esc(id.label)}<span class="badge n" title="Not in the beacon database on this frequency">×${c.ident_count}</span>`;
     else identCell = '<span class="none">…</span>';
+    if (id.kind === 'confirmed' || id.kind === 'near') identCell += dxBadges(`${id.nav.ident}@${(id.nav.freq_hz / 1e3).toFixed(1)}`);
     if (c.ggmorse) identCell += '<span class="badge g" title="ggmorse is assisting: a second decoder, given to a few unidentified channels that show keying">2nd</span>';
     // Identified beacons give their channel up: tracked by carrier between
     // revisits, which reopen one to re-copy the ident.
@@ -412,8 +414,10 @@ function initMap() {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
   }).addTo(map);
   for (const name of ['rings', 'unheard', 'earlier', 'paths', 'heard']) layers[name] = L.layerGroup().addTo(map);
+  // While the timeline replays history, the live layers stay off the map.
   const bind = (box, layer) => $(box).addEventListener('change', (e) => {
-    if (e.target.checked) layers[layer].addTo(map); else map.removeLayer(layers[layer]);
+    if (e.target.checked && !(state.timeline && layer === 'earlier')) layers[layer].addTo(map);
+    else map.removeLayer(layers[layer]);
   });
   bind('show-rings', 'rings');
 
@@ -671,18 +675,23 @@ function renderMap() {
     sweep(stores.unheard, layers.unheard);
   }
 
-  if ($('autofit').checked) {
+  if ($('autofit').checked && !state.timeline) {
     const sig = pts.map((p) => p.join(',')).sort().join(';');
     if (sig !== fitSig && pts.length) {
       fitSig = sig;
-      fitting = true;
-      if (pts.length >= 2) map.fitBounds(L.latLngBounds(pts).pad(0.3), { maxZoom: 8 });
-      else map.setView(pts[0], 6);
-      // Leaflet fires its move/zoom events around the change; clear the flag
-      // once they have run.
-      setTimeout(() => { fitting = false; }, 400);
+      fitView(pts);
     }
   }
+}
+
+function fitView(pts) {
+  if (!map || !pts.length) return;
+  fitting = true;
+  if (pts.length >= 2) map.fitBounds(L.latLngBounds(pts).pad(0.3), { maxZoom: 8 });
+  else map.setView(pts[0], 6);
+  // Leaflet fires its move/zoom events around the change; clear the flag
+  // once they have run.
+  setTimeout(() => { fitting = false; }, 400);
 }
 
 function setAutofit(on) {
@@ -776,6 +785,9 @@ function ago(s) {
 }
 const utcDate = (s) => new Date(s * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
 
+// NEW / RARE, from alerts.js once it has loaded.
+const dxBadges = (key) => window.ndb?.badgesFor?.(key) || '';
+
 function renderHeard() {
   const rows = [...state.heard].sort((a, b) => b.last_s - a.last_s);
   $('heard-hint').textContent = rows.length ? `${rows.length} beacon${rows.length === 1 ? '' : 's'}` : '';
@@ -785,7 +797,7 @@ function renderHeard() {
   }
   state.heardRows = rows;
   $('heard-rows').innerHTML = rows.map((e, i) => `<tr${e.lat != null ? ` data-i="${i}" title="Show on the map"` : ''}>
-    <td class="ident">${esc(e.ident)}${e.confirmed ? '<span class="badge ok">✓</span>' : ''}</td>
+    <td class="ident">${esc(e.ident)}${e.confirmed ? '<span class="badge ok">✓</span>' : ''}${dxBadges(e.key)}</td>
     <td class="station">${e.name ? `${esc(e.name)}<span class="cc">${flag(e.country)} ${esc(e.country)}</span>` : '<span class="guess">not in database</span>'}</td>
     <td class="freq">${(e.freq_hz / 1e3).toFixed(1)}</td>
     <td class="num dist">${e.dist_km != null ? `${e.dist_km} km<span class="brg">${compass(e.bearing_deg)}</span>` : '–'}</td>
@@ -968,6 +980,7 @@ function onMessage(m) {
     state.heardNow = m.now;
     renderHeard();
     renderMap();
+    window.ndb?.onHeard?.();
   }
 }
 
@@ -1003,6 +1016,11 @@ setInterval(() => { state.navaidsKey = ''; refreshNavaids(); }, 10 * 60 * 1000);
 initMap();
 connect();
 
-// What stats.js shares.
-window.ndb = { $, esc, flag, compass, tip, state };
+// What stats.js, timeline.js and export.js share.
+window.ndb = {
+  $, esc, flag, compass, tip, state, layers, renderTable, renderHeard, ndbIcon, greatCircle, placeTip, fitView, TIP,
+  get map() { return map; },
+  // Back to the live picture: forget the last fit so autofit re-frames it.
+  resumeLive() { fitSig = ''; renderMap(); },
+};
 })();

@@ -1152,11 +1152,14 @@ void history_sample(App &app, bool final = false)
 // of day in UTC or the receiver's own time zone, by distance), so per beacon
 // this sends its minutes heard and mean SNR for every hour, each hour one
 // character of kHourChars (value 0-63), a string of `hours` characters.
-std::string stats_json(App &app, int hours)
+// With step 900 the slots are the history's own 15-minute buckets instead
+// (4 per hour), for the map's timeline and the CSV export.
+std::string stats_json(App &app, int hours, int step = 3600)
 {
     static const char kHourChars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     const int64_t now = now_ms() / 1000;
-    const int64_t t0 = now - now % 3600 - int64_t(hours - 1) * 3600;   // first hour shown
+    const int slots = hours * (3600 / step);
+    const int64_t t0 = now - now % step - int64_t(slots - 1) * step;   // first slot shown
 
     struct Beacon {
         int minutes = 0;
@@ -1166,21 +1169,21 @@ std::string stats_json(App &app, int hours)
         int64_t first = 0, last = 0;
     };
     std::map<std::string, Beacon> beacons;
-    std::vector<int> up(hours, 0);
+    std::vector<int> up(slots, 0);
     int up_total = 0;
     {
         std::lock_guard<std::mutex> lk(app.hist_mu);
         for (auto it = app.history.lower_bound(t0); it != app.history.end(); ++it) {
             const int64_t t = it->first;
-            const int i = int((t - t0) / 3600);
-            if (i < 0 || i >= hours) continue;
+            const int i = int((t - t0) / step);
+            if (i < 0 || i >= slots) continue;
             const auto &b = it->second;
             up[i] += b.up_min;
             up_total += b.up_min;
             for (const auto &[key, a] : b.beacons) {
                 if (a.minutes <= 0) continue;
                 auto &bc = beacons[key];
-                if (bc.mins.empty()) { bc.mins.assign(hours, 0); bc.snr.assign(hours, 0.0f); }
+                if (bc.mins.empty()) { bc.mins.assign(slots, 0); bc.snr.assign(slots, 0.0f); }
                 bc.minutes += a.minutes;
                 bc.snr_sum += a.snr_sum;
                 bc.snr_max = std::max(bc.snr_max, a.snr_max);
@@ -1199,14 +1202,18 @@ std::string stats_json(App &app, int hours)
             if (beacons.count(key)) meta[key] = e;
     }
     std::string tz;
+    double rx_lat = NAN, rx_lon = NAN;
     {
         std::lock_guard<std::mutex> lk(app.rx.mu);
         tz = app.rx.timezone;
+        if (app.rx.have_pos) { rx_lat = app.rx.lat; rx_lon = app.rx.lon; }
     }
 
     auto enc = [&](int v) { return kHourChars[std::clamp(v, 0, 63)]; };
+    auto coord = [](double v) { return std::isfinite(v) ? num(v, 4) : std::string("null"); };
     std::string j = "{\"now\":" + std::to_string(now) + ",\"hours\":" + std::to_string(hours) +
-                    ",\"t0\":" + std::to_string(t0) + ",\"timezone\":" + q(tz) +
+                    ",\"step\":" + std::to_string(step) + ",\"t0\":" + std::to_string(t0) +
+                    ",\"timezone\":" + q(tz) + ",\"rx_lat\":" + coord(rx_lat) + ",\"rx_lon\":" + coord(rx_lon) +
                     ",\"up_minutes\":" + std::to_string(up_total) + ",\"up\":\"";
     for (int v : up) j += enc(v);
     j += "\",\"beacons\":[";
@@ -1226,12 +1233,13 @@ std::string stats_json(App &app, int hours)
              ",\"name\":" + q(e.name) + ",\"country\":" + q(e.country) + ",\"freq_hz\":" + num(e.freq_hz) +
              ",\"dist_km\":" + (e.dist_km >= 0 ? num(e.dist_km, 0) : "null") +
              ",\"bearing_deg\":" + (e.bearing_deg >= 0 ? num(e.bearing_deg, 0) : "null") +
+             ",\"lat\":" + coord(e.lat) + ",\"lon\":" + coord(e.lon) +
              ",\"minutes\":" + std::to_string(b.minutes) + ",\"snr_mean\":" + num(b.snr_sum / b.minutes) +
              ",\"snr_best\":" + num(b.snr_max) + ",\"first_s\":" + std::to_string(b.first) +
              ",\"last_s\":" + std::to_string(b.last) + ",\"m\":\"";
-        for (int i = 0; i < hours; ++i) j += enc(b.mins[i]);
+        for (int i = 0; i < slots; ++i) j += enc(b.mins[i]);
         j += "\",\"s\":\"";
-        for (int i = 0; i < hours; ++i) j += enc(b.mins[i] ? int(std::lround(b.snr[i] / b.mins[i])) : 0);
+        for (int i = 0; i < slots; ++i) j += enc(b.mins[i] ? int(std::lround(b.snr[i] / b.mins[i])) : 0);
         j += "\"}";
     }
 
@@ -1258,7 +1266,8 @@ std::string stats_json(App &app, int hours)
         first = false;
         j += "{\"ident\":" + q(n.ident) + ",\"name\":" + q(n.name) + ",\"country\":" + q(n.country) +
              ",\"freq_hz\":" + num(n.freq_hz, 0) + ",\"dist_km\":" + (h.dist_km >= 0 ? num(h.dist_km, 0) : "null") +
-             ",\"bearing_deg\":" + (h.bearing_deg >= 0 ? num(h.bearing_deg, 0) : "null") + "}";
+             ",\"bearing_deg\":" + (h.bearing_deg >= 0 ? num(h.bearing_deg, 0) : "null") +
+             ",\"lat\":" + coord(n.lat) + ",\"lon\":" + coord(n.lon) + "}";
     }
     return j + "]}";
 }
@@ -1846,7 +1855,10 @@ std::unique_ptr<ix::HttpServer> start_web(App &app)
                 }
             } else if (api && leaf == "stats") {
                 // hours: 1..720 (30 days, what history keeps); default 168.
+                // step: seconds per slot, 3600 (default) or 900.
                 const std::string raw = query_param(req->uri, "hours");
+                const std::string rs = query_param(req->uri, "step");
+                const int step = rs == "900" ? 900 : 3600;
                 long hours = 168;
                 bool ok = true;
                 if (!raw.empty()) {
@@ -1854,12 +1866,13 @@ std::unique_ptr<ix::HttpServer> start_web(App &app)
                     if (ok) hours = std::stol(raw);
                     ok = ok && hours >= 1 && hours <= kHistKeepS / 3600;
                 }
+                if (!rs.empty() && rs != "900" && rs != "3600") ok = false;
                 resp->headers["Content-Type"] = "application/json";
                 if (!ok) {
                     resp->statusCode = 400;
-                    resp->body = "{\"error\":\"hours must be a whole number from 1 to 720\"}";
+                    resp->body = "{\"error\":\"hours must be a whole number from 1 to 720, step 900 or 3600\"}";
                 } else {
-                    resp->body = stats_json(app, int(hours));
+                    resp->body = stats_json(app, int(hours), step);
                 }
             } else if (api && leaf == "search") {
                 resp->headers["Content-Type"] = "application/json";
