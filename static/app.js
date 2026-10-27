@@ -380,6 +380,7 @@ function clickSpec(view, e) {
 // detail shown on hover.
 
 let map = null, ringsFor = '', unheardSig = '';
+let earlierTop = 0;                // strongest best SNR among heard-earlier markers, for their bars
 // Autofit: keep the view framed on the receiver and the confirmed beacons,
 // re-fitting when that set changes. A move the user makes (or asks for, via
 // search or selecting a beacon) turns it off; `fitting` marks our own moves
@@ -490,7 +491,17 @@ const row = (k, v) => v == null || v === '' ? '' : `<tr><td>${k}</td><td>${v}</t
 const where = (n) => n.dist_km != null ? `${n.dist_km} km ${compass(n.bearing_deg)} <span class="m">(${n.bearing_deg}°)</span>` : '';
 const power = (p) => p ? p.charAt(0) + p.slice(1).toLowerCase() : '';
 
-function tipBeacon(n, c, kind) {
+// Phone-style signal bars, relative to the strongest beacon in the same set
+// on the map: SNRs have no absolute reference here, so the strongest gets
+// all five bars and the rest scale down linearly in dB towards 0 dB SNR.
+function bars(snr, top, cls = '') {
+  const n = top > 0 ? Math.max(1, Math.min(5, Math.ceil(5 * snr / top))) : 5;
+  const b = [];
+  for (let i = 0; i < 5; i++) b.push(`<i style="height:${4 + i * 2}px"${i < n ? ' class="on"' : ''}></i>`);
+  return `<span class="tt-bars ${cls}" title="${n}/5 — relative to the strongest shown (${top.toFixed(0)} dB)">${b.join('')}</span>`;
+}
+
+function tipBeacon(n, c, kind, top) {
   const status = {
     confirmed: '<span class="ok">✓ decoded ident matches</span>',
     near: `<span class="warn">≈ decoded ${esc(c.ident)} — all but the last letter</span>`,
@@ -501,7 +512,7 @@ function tipBeacon(n, c, kind) {
     ? c.candidates.slice(1, 4).map((x) => `${esc(x.ident)} ${esc(x.name)}${x.dist_km != null ? ` <span class="m">${x.dist_km} km</span>` : ''}`).join('<br>')
     : '';
   const copy = c.text.trim() ? esc(c.text.trim().slice(-48)) : '';
-  return `<div class="tt-head"><b>${esc(n.ident)}</b> ${esc(n.name)} ${flag(n.country)}</div>
+  return `<div class="tt-head">${bars(c.snr_db, top)}<b>${esc(n.ident)}</b> ${esc(n.name)} ${flag(n.country)}</div>
     <div class="tt-sub">${status}</div>
     <table>
       ${row('Published', `${(n.freq_hz / 1e3).toFixed(1)} kHz`)}
@@ -517,8 +528,8 @@ function tipBeacon(n, c, kind) {
     ${copy ? `<div class="tt-copy">${copy}</div>` : ''}`;
 }
 
-function tipEarlier(e) {
-  return `<div class="tt-head"><b>${esc(e.ident)}</b> ${esc(e.name)} ${flag(e.country)}</div>
+function tipEarlier(e, top) {
+  return `<div class="tt-head">${bars(e.best_snr_db, Math.max(top, e.best_snr_db), 'earlier')}<b>${esc(e.ident)}</b> ${esc(e.name)} ${flag(e.country)}</div>
     <div class="tt-sub"><span class="earlier">heard earlier — not live now</span></div>
     <table>
       ${row('Frequency', `${(e.freq_hz / 1e3).toFixed(1)} kHz`)}
@@ -625,11 +636,14 @@ function renderMap() {
   const pts = haveRx ? [[rx.lat, rx.lon]] : [];
   const liveIdents = new Set();
   const guessKeys = new Set();     // published beacons already drawn as a guess
-  for (const c of visibleChannels()) {
+  const drawn = visibleChannels().filter((c) => {
     const id = identity(c);
-    if (!id.nav) continue;
+    return id.nav && (id.kind !== 'guess' || $('show-unheard').checked);
+  });
+  const liveTop = Math.max(0, ...drawn.map((c) => c.snr_db));
+  for (const c of drawn) {
+    const id = identity(c);
     const guess = id.kind === 'guess';
-    if (guess && !$('show-unheard').checked) continue;
     const sel = c.id === state.selected;
     const ll = [id.nav.lat, id.nav.lon];
     if (!guess) liveIdents.add(id.nav.ident);
@@ -644,7 +658,7 @@ function renderMap() {
     const labelClass = `${guess ? 'guess' : ''}${sel ? ' sel' : ''}`;
     upsert(stores.heard, layers.heard, `c${c.id}:${id.nav.ident}`, ll, `${col}|${guess}|${sel}|${label}`,
       () => ndbIcon(col, { solid: !guess, sel, label, labelClass }),
-      tipBeacon(id.nav, c, id.kind), () => select(c.id, 'map'), sel ? 900 : guess ? 0 : 500);
+      tipBeacon(id.nav, c, id.kind, liveTop), () => select(c.id, 'map'), sel ? 900 : guess ? 0 : 500);
     if (!guess) pts.push(ll);
   }
   sweep(stores.heard, layers.heard);
@@ -654,11 +668,12 @@ function renderMap() {
   // default 24 h shows one full day/night cycle; "all" is the whole log.
   const windowS = Number($('earlier-window').value);
   const now = state.heardNow || Date.now() / 1000;
-  for (const e of state.heard) {
-    if (!e.confirmed || e.lat == null || liveIdents.has(e.ident)) continue;
-    if (windowS > 0 && now - e.last_s > windowS) continue;
+  const earlier = state.heard.filter((e) => e.confirmed && e.lat != null && !liveIdents.has(e.ident) &&
+    !(windowS > 0 && now - e.last_s > windowS));
+  earlierTop = Math.max(0, ...earlier.map((e) => e.best_snr_db));
+  for (const e of earlier) {
     upsert(stores.earlier, layers.earlier, e.key, [e.lat, e.lon], 'earlier',
-      () => ndbIcon('#3b82f6', { size: 14, solid: false, label: e.ident, labelClass: 'earlier' }), tipEarlier(e));
+      () => ndbIcon('#3b82f6', { size: 14, solid: false, label: e.ident, labelClass: 'earlier' }), tipEarlier(e, earlierTop));
   }
   sweep(stores.earlier, layers.earlier);
 
@@ -913,7 +928,7 @@ function showHeard(e) {
   if (ch) { showLive(ch, 'heard'); return; }
   const earlier = stores.earlier.get(e.key);
   if (earlier && map.hasLayer(layers.earlier)) { flyToMarker(earlier.m); return; }
-  pinAt(e.lat, e.lon, e.ident, tipEarlier(e));
+  pinAt(e.lat, e.lon, e.ident, tipEarlier(e, earlierTop));
 }
 
 $('heard-rows').addEventListener('click', (ev) => {
