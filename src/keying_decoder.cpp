@@ -431,8 +431,18 @@ void KeyingDecoder::end_space(Lane &l, double ms)
         if (l.gaps.size() >= kGapsNeeded) {
             std::vector<double> g(l.gaps.begin(), l.gaps.end());
             std::sort(g.begin(), g.end());
-            const double q25 = g[g.size() / 4], q90 = g[g.size() * 9 / 10];
+            const double q25 = g[g.size() / 4], q75 = g[g.size() * 3 / 4], q90 = g[g.size() * 9 / 10];
             if (q90 >= 2.5 * q25) l.word_ms = std::max(4.5 * l.dit_ms, 1.25 * q25);
+            // A beacon whose letter gaps are already past the 5-dit default
+            // would copy as nothing but single letters, so a smaller step
+            // to its longer gaps is enough there. EZF (237 kHz, K1RA) keys
+            // its ident without a pause, letters 8 dits apart and repeats
+            // 15: 1.9x, and it copied as "E Z F E Z F" whenever no fade had
+            // left a longer gap among the recent ones. The word gap goes
+            // between the two. A quarter of the gaps or more must be the
+            // long ones (an ident's repeats are a third of EZF's, half of a
+            // two-letter one's), not the odd one a fade or bust leaves.
+            else if (q25 >= 5.0 * l.dit_ms && q75 >= 1.5 * q25) l.word_ms = std::sqrt(q25 * q90);
         }
     }
     if (l.code.empty()) return;
