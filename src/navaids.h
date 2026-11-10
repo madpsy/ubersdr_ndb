@@ -15,6 +15,8 @@
 
 #pragma once
 
+#include <deque>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -67,11 +69,19 @@ public:
 
     // The nearest candidate whose ident equals `ident`, or — if none — whose
     // ident starts with it and is one character longer (ggmorse often drops a
-    // slow ident's last letter). `exact` says which. nav == nullptr if neither.
+    // slow ident's last letter), or is it less its last letter: a beacon
+    // re-identified with a letter added since the lists were made (BZ on
+    // 407 kHz, Statesboro GA, keys BZQ; RXX lists MD/MDH, HB/HBJ, FF/FFC
+    // alike), unless that letter is E or T. That hit is the listed beacon under the ident heard. `exact`
+    // is true only for the first. nav == nullptr if none.
     NavaidHit match(double freq_hz, const std::string &ident, bool &exact, double tol_hz = 600.0) const;
 
 private:
     std::vector<Navaid> navs_;  // sorted by frequency
+    // Listed beacons under the longer ident heard (see match); a deque, so
+    // the hits handed out stay valid.
+    mutable std::mutex renamed_mu_;
+    mutable std::deque<Navaid> renamed_;
     double rx_lat_ = 0.0, rx_lon_ = 0.0;
     bool have_rx_ = false;
     double max_km_ = 0.0;

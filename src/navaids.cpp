@@ -221,6 +221,25 @@ NavaidHit NavaidDb::match(double freq_hz, const std::string &ident, bool &exact,
         if (h.nav->ident == ident) { exact = true; return h; }
     for (const auto &h : c)
         if (h.nav->ident.size() == ident.size() + 1 && h.nav->ident.compare(0, ident.size(), ident) == 0) return h;
+    for (auto h : c) {
+        const Navaid &n = *h.nav;
+        if (n.ident.size() < 2 || n.ident.size() + 1 != ident.size() || ident.compare(0, n.ident.size(), n.ident) != 0)
+            continue;
+        // Not E or T: one element, what a stray mark (or a dash after the
+        // ident) adds to a copy.
+        if (ident.back() == 'E' || ident.back() == 'T') continue;
+        std::lock_guard<std::mutex> lk(renamed_mu_);
+        auto it = std::find_if(renamed_.begin(), renamed_.end(), [&](const Navaid &r) {
+            return r.ident == ident && r.freq_hz == n.freq_hz && r.lat == n.lat && r.lon == n.lon;
+        });
+        if (it == renamed_.end()) {
+            renamed_.push_back(n);
+            renamed_.back().ident = ident;
+            it = renamed_.end() - 1;
+        }
+        h.nav = &*it;
+        return h;
+    }
     return {};
 }
 
