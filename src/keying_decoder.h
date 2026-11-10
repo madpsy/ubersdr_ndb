@@ -113,6 +113,7 @@ public:
     int   window_ms() const { return int(lane().w * kEnvMs); }  // envelope window of the lane copied
 
     static constexpr float kMinQuality = 0.75f;
+    static constexpr double kLongMarkMs = 1000.0;
 
 private:
     struct Lane {
@@ -137,6 +138,8 @@ private:
         bool in_word = false;   // letters emitted since the last word gap
         std::deque<double> gaps;      // recent spaces of 2.5+ dits, ms
         double word_ms = 0.0;   // learned word gap; 0 until learned
+        bool long_mark = false; // the mark now on is a dash after the ident
+        bool after_long = false;  // the space now on follows one
 
         // A space at least this long ends a word.
         double word_gap_ms() const { return word_ms > 0 ? word_ms : 5.0 * dit_ms; }
@@ -145,6 +148,10 @@ private:
         // Keying, at a speed this lane's window is short enough for.
         bool fits() const { return keying() && w * kEnvMs <= 0.6 * dit_ms; }
         bool idle() const { return !in_word && code.empty(); }
+        // A mark this long is no Morse element: over 5 dits (a dah is 3,
+        // stretched to 4 at most), and never under 0.6 s; 1 s until the dit
+        // is known (a 5 wpm dah is 0.72 s).
+        double long_mark_ms() const { return dit_ms > 0 ? std::max(600.0, 5.0 * dit_ms) : kLongMarkMs; }
     };
 
     // A candidate tone: mixed to DC, and its keying contrast tracked.

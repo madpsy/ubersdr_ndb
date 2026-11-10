@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <utility>
 
 namespace ndb {
 
@@ -339,6 +340,22 @@ void KeyingDecoder::lane_sample(Lane &l, float e)
     ++l.run;
     if (on == l.on) {
         l.pending = 0;
+        // Many North American NDBs (RXX's "DAID": RJ, YWA, YPO, ZZR at K1RA)
+        // follow the ident with a long dash, 2-6 s of tone, sometimes with
+        // hardly a pause before it. It is no letter: it ends the word as soon
+        // as it is clearly too long for a dah, and takes no part in learning
+        // the dit, the timing quality or the word gap. Before this YWA copied
+        // live as "YWAT"; and synthetic YWA, YPO and ZZR with their dashes,
+        // clean, copied not at all: the dash, kept as a mark, pulled the dit
+        // estimate off.
+        if (l.on && !l.long_mark && l.run * kEnvMs >= l.long_mark_ms()) {
+            l.long_mark = true;
+            if (!l.code.empty()) flush_letter(l, true);
+            else if (l.in_word) {
+                l.in_word = false;
+                if (&l == &lane() && on_text) on_text(" ");
+            }
+        }
         // A letter is complete once the silence after it is long enough, and
         // the word once it reaches the word gap; don't wait for the next
         // mark, which for an NDB may be seconds away.
@@ -364,6 +381,11 @@ void KeyingDecoder::lane_sample(Lane &l, float e)
 
 void KeyingDecoder::end_mark(Lane &l, double ms)
 {
+    if (l.long_mark) {
+        l.long_mark = false;
+        l.after_long = true;
+        return;
+    }
     if (ms < kMinMarkMs) return;
     l.marks.push_back(ms);
     if (l.marks.size() > kMarksKept) l.marks.pop_front();
@@ -413,6 +435,8 @@ void KeyingDecoder::end_mark(Lane &l, double ms)
 
 void KeyingDecoder::end_space(Lane &l, double ms)
 {
+    // The pause after a long dash ends no letter.
+    if (std::exchange(l.after_long, false)) return;
     if (l.dit_ms <= 0) return;
     // The word gap: just over this beacon's own letter spacing, taken as the
     // lower quartile of its recent letter-ending spaces. CML on 387 kHz and
