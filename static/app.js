@@ -1027,6 +1027,32 @@ function connect() {
 }
 
 window.addEventListener('resize', () => { drawSpectra(); map?.invalidateSize(); });
+
+// ── Expanded map ────────────────────────────────────────────────────────────
+// The map card lifts out to nearly fill the window; the rest of the page stays put underneath.
+function setMapExpanded(on) {
+  document.body.classList.toggle('map-expanded', on);
+  $('map-expand').setAttribute('aria-pressed', on ? 'true' : 'false');
+  $('map-expand').textContent = on ? '✕' : '⤢';
+  $('map-expand').title = on ? 'Back to the normal layout (Esc)' : 'Expand the map to fill the window (Esc to restore)';
+  let bd = $('map-backdrop');
+  if (on && !bd) {
+    bd = document.createElement('div');
+    bd.id = 'map-backdrop';
+    bd.addEventListener('click', () => setMapExpanded(false));
+    document.body.appendChild(bd);
+  } else if (!on && bd) bd.remove();
+  if (!map) return;
+  map.invalidateSize();
+  if ($('autofit').checked) { fitSig = ''; renderMap(); }
+}
+$('map-expand').addEventListener('click', () => setMapExpanded(!document.body.classList.contains('map-expanded')));
+// Capture phase, so a search or stats modal open over the expanded map takes the Esc first.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !document.body.classList.contains('map-expanded')) return;
+  if (document.querySelector('.modal:not([hidden])')) return;
+  setMapExpanded(false);
+}, true);
 setInterval(() => { state.navaidsKey = ''; refreshNavaids(); }, 10 * 60 * 1000);
 initMap();
 connect();

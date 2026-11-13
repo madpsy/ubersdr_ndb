@@ -148,6 +148,18 @@ header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 #table-wrap { overflow: auto; max-height: 560px; }
 #map { flex: 1; min-height: 480px; }
 
+/* Expanded map: the whole card (controls, map, timeline) lifts out to nearly fill the window. */
+#map-backdrop { position: fixed; inset: 0; z-index: 1500; background: rgba(0,0,0,0.6); backdrop-filter: blur(2px); }
+body.map-expanded { overflow: hidden; }
+body.map-expanded #map-card {
+  position: fixed; inset: 2vh 2vw; z-index: 1600;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+}
+body.map-expanded #map-card .card-header { flex-wrap: wrap; }
+body.map-expanded #map { min-height: 0; }
+#map-expand { font-size: 14px; line-height: 1; padding: 3px 8px; }
+@media (max-width: 700px) { body.map-expanded #map-card { inset: 8px; } }
+
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 th {
   position: sticky; top: 0; z-index: 1; background: var(--surface);
